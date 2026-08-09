@@ -1,0 +1,14 @@
+.DS_Store
+*.orig
+*.rej
+/.config
+/.config.old
+/Module.symvers
+/System.map
+/modules.order
+/out/
+/vmlinux
+/arch/arm64/boot/Image*
+/arch/arm64/include/generated/
+/include/config/
+/include/generated/

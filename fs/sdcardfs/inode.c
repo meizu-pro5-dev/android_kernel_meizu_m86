@@ -54,6 +54,7 @@ static int sdcardfs_create(struct inode *dir, struct dentry *dentry,
 {
 	int err = 0;
 	struct dentry *lower_dentry;
+	struct vfsmount *lower_mnt;
 	struct dentry *lower_parent_dentry = NULL;
 	struct path lower_path;
 	const struct cred *saved_cred = NULL;
@@ -73,6 +74,7 @@ static int sdcardfs_create(struct inode *dir, struct dentry *dentry,
 
 	sdcardfs_get_lower_path(dentry, &lower_path);
 	lower_dentry = lower_path.dentry;
+	lower_mnt = lower_path.mnt;
 	lower_parent_dentry = lock_parent(lower_dentry);
 
 	/* set last 16bytes of mode field to 0664 */
@@ -83,7 +85,8 @@ static int sdcardfs_create(struct inode *dir, struct dentry *dentry,
 	copied_fs = copy_fs_struct(current->fs);
 	current->fs = copied_fs;
 	current->fs->umask = 0;
-	err = vfs_create(lower_parent_dentry->d_inode, lower_dentry, mode, want_excl);
+	err = vfs_create2(lower_mnt, lower_parent_dentry->d_inode,
+			lower_dentry, mode, want_excl);
 	if (err)
 		goto out;
 
@@ -149,6 +152,7 @@ static int sdcardfs_unlink(struct inode *dir, struct dentry *dentry)
 {
 	int err;
 	struct dentry *lower_dentry;
+	struct vfsmount *lower_mnt;
 	struct inode *lower_dir_inode = sdcardfs_lower_inode(dir);
 	struct dentry *lower_dir_dentry;
 	struct path lower_path;
@@ -167,10 +171,11 @@ static int sdcardfs_unlink(struct inode *dir, struct dentry *dentry)
 
 	sdcardfs_get_lower_path(dentry, &lower_path);
 	lower_dentry = lower_path.dentry;
+	lower_mnt = lower_path.mnt;
 	dget(lower_dentry);
 	lower_dir_dentry = lock_parent(lower_dentry);
 
-	err = vfs_unlink(lower_dir_inode, lower_dentry);
+	err = vfs_unlink2(lower_mnt, lower_dir_inode, lower_dentry);
 
 	/*
 	 * Note: unlinking on top of NFS can cause silly-renamed files.
@@ -204,6 +209,7 @@ static int sdcardfs_symlink(struct inode *dir, struct dentry *dentry,
 {
 	int err = 0;
 	struct dentry *lower_dentry;
+	struct vfsmount *lower_mnt;
 	struct dentry *lower_parent_dentry = NULL;
 	struct path lower_path;
 
@@ -211,6 +217,7 @@ static int sdcardfs_symlink(struct inode *dir, struct dentry *dentry,
 
 	sdcardfs_get_lower_path(dentry, &lower_path);
 	lower_dentry = lower_path.dentry;
+	lower_mnt = lower_path.mnt;
 	lower_parent_dentry = lock_parent(lower_dentry);
 
 	err = vfs_symlink(lower_parent_dentry->d_inode, lower_dentry, symname);
@@ -251,6 +258,7 @@ static int sdcardfs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode
 	int err = 0;
 	int make_nomedia_in_obb = 0;
 	struct dentry *lower_dentry;
+	struct vfsmount *lower_mnt;
 	struct dentry *lower_parent_dentry = NULL;
 	struct path lower_path;
 	struct sdcardfs_sb_info *sbi = SDCARDFS_SB(dentry->d_sb);
@@ -281,6 +289,7 @@ static int sdcardfs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode
 	/* the lower_dentry is negative here */
 	sdcardfs_get_lower_path(dentry, &lower_path);
 	lower_dentry = lower_path.dentry;
+	lower_mnt = lower_path.mnt;
 	lower_parent_dentry = lock_parent(lower_dentry);
 
 	/* set last 16bytes of mode field to 0775 */
@@ -291,7 +300,8 @@ static int sdcardfs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode
 	copied_fs = copy_fs_struct(current->fs);
 	current->fs = copied_fs;
 	current->fs->umask = 0;
-	err = vfs_mkdir(lower_parent_dentry->d_inode, lower_dentry, mode);
+	err = vfs_mkdir2(lower_mnt, lower_parent_dentry->d_inode,
+			lower_dentry, mode);
 
 	if (err)
 		goto out;
@@ -354,6 +364,7 @@ static int sdcardfs_rmdir(struct inode *dir, struct dentry *dentry)
 {
 	struct dentry *lower_dentry;
 	struct dentry *lower_dir_dentry;
+	struct vfsmount *lower_mnt;
 	int err;
 	struct path lower_path;
 	const struct cred *saved_cred = NULL;
@@ -374,9 +385,10 @@ static int sdcardfs_rmdir(struct inode *dir, struct dentry *dentry)
 	sdcardfs_get_real_lower(dentry, &lower_path);
 
 	lower_dentry = lower_path.dentry;
+	lower_mnt = lower_path.mnt;
 	lower_dir_dentry = lock_parent(lower_dentry);
 
-	err = vfs_rmdir(lower_dir_dentry->d_inode, lower_dentry);
+	err = vfs_rmdir2(lower_mnt, lower_dir_dentry->d_inode, lower_dentry);
 	if (err)
 		goto out;
 
@@ -440,6 +452,7 @@ static int sdcardfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 	struct dentry *lower_new_dentry = NULL;
 	struct dentry *lower_old_dir_dentry = NULL;
 	struct dentry *lower_new_dir_dentry = NULL;
+	struct vfsmount *lower_mnt = NULL;
 	struct dentry *trap = NULL;
 	struct dentry *new_parent = NULL;
 	struct path lower_old_path, lower_new_path;
@@ -461,6 +474,7 @@ static int sdcardfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 	sdcardfs_get_lower_path(new_dentry, &lower_new_path);
 	lower_old_dentry = lower_old_path.dentry;
 	lower_new_dentry = lower_new_path.dentry;
+	lower_mnt = lower_old_path.mnt;
 	lower_old_dir_dentry = dget_parent(lower_old_dentry);
 	lower_new_dir_dentry = dget_parent(lower_new_dentry);
 
@@ -476,7 +490,8 @@ static int sdcardfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 		goto out;
 	}
 
-	err = vfs_rename(lower_old_dir_dentry->d_inode, lower_old_dentry,
+	err = vfs_rename2(lower_mnt,
+			 lower_old_dir_dentry->d_inode, lower_old_dentry,
 			 lower_new_dir_dentry->d_inode, lower_new_dentry);
 	if (err)
 		goto out;
@@ -503,7 +518,7 @@ static int sdcardfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 	/* At this point, not all dentry information has been moved, so
 	 * we pass along new_dentry for the name.*/
 	get_derived_permission_new(new_dentry->d_parent, old_dentry, new_dentry);
-	fix_derived_permission(old_dentry->d_inode);
+	fixup_tmp_permissions(old_dentry->d_inode);
 	fixup_top_recursive(old_dentry);
 out:
 	unlock_rename(lower_old_dir_dentry, lower_new_dir_dentry);
@@ -586,50 +601,65 @@ static void sdcardfs_put_link(struct dentry *dentry, struct nameidata *nd,
 }
 #endif
 
-static int sdcardfs_permission(struct inode *inode, int mask)
+static int sdcardfs_permission_wrn(struct inode *inode, int mask)
 {
-	int err;
+	WARN(1, "sdcardfs requires permission2\n");
+	return -EINVAL;
+}
+
+static void sdcardfs_copy_permission_attrs(struct inode *dest,
+		const struct inode *src)
+{
+	memset(dest, 0, sizeof(*dest));
+	dest->i_mode = src->i_mode;
+	dest->i_uid = src->i_uid;
+	dest->i_gid = src->i_gid;
+	dest->i_rdev = src->i_rdev;
+	dest->i_atime = src->i_atime;
+	dest->i_mtime = src->i_mtime;
+	dest->i_ctime = src->i_ctime;
+	dest->i_blkbits = src->i_blkbits;
+	dest->i_flags = src->i_flags;
+	dest->i_sb = src->i_sb;
+}
+
+static int sdcardfs_permission(struct vfsmount *mnt, struct inode *inode,
+		int mask)
+{
+	struct inode tmp;
 	struct inode *top = SDCARDFS_I(inode)->top;
 
-	/* Ensure owner is up to date */
-	if (top &&
-	    from_kuid(&init_user_ns, inode->i_uid) != from_kuid(&init_user_ns, top->i_uid)) {
-		SDCARDFS_I(inode)->d_uid = SDCARDFS_I(top)->d_uid;
-		fix_derived_permission(inode);
-	}
+	if (!mnt || !mnt->data || !top)
+		return -EINVAL;
 
-	/*
-	 * Permission check on sdcardfs inode.
-	 * Calling process should have AID_SDCARD_RW permission
-	 */
-	err = generic_permission(inode, mask);
+	sdcardfs_copy_permission_attrs(&tmp, inode);
+	tmp.i_uid = make_kuid(&init_user_ns, SDCARDFS_I(top)->d_uid);
+	tmp.i_gid = make_kgid(&init_user_ns, get_gid(mnt, SDCARDFS_I(top)));
+	tmp.i_mode = (inode->i_mode & S_IFMT) |
+			get_mode(mnt, SDCARDFS_I(top));
 
-	/* XXX
-	 * Original sdcardfs code calls inode_permission(lower_inode,.. )
-	 * for checking inode permission. But doing such things here seems
-	 * duplicated work, because the functions called after this func,
-	 * such as vfs_create, vfs_unlink, vfs_rename, and etc,
-	 * does exactly same thing, i.e., they calls inode_permission().
-	 * So we just let they do the things.
-	 * If there are any security hole, just uncomment following if block.
-	 */
-#if 0
-	if (!err) {
-		/*
-		 * Permission check on lower_inode(=EXT4).
-		 * we check it with AID_MEDIA_RW permission
-		 */
-		struct inode *lower_inode;
-		OVERRIDE_CRED(SDCARDFS_SB(inode->sb));
+	return generic_permission(&tmp, mask);
+}
 
-		lower_inode = sdcardfs_lower_inode(inode);
-		err = inode_permission(lower_inode, mask);
+static void sdcardfs_fillattr(struct vfsmount *mnt, struct inode *inode,
+		struct kstat *stat)
+{
+	struct inode *top = SDCARDFS_I(inode)->top;
 
-		REVERT_CRED();
-	}
-#endif
-	return err;
-
+	stat->dev = inode->i_sb->s_dev;
+	stat->ino = inode->i_ino;
+	stat->mode = (inode->i_mode & S_IFMT) |
+			get_mode(mnt, SDCARDFS_I(top));
+	stat->nlink = inode->i_nlink;
+	stat->uid = make_kuid(&init_user_ns, SDCARDFS_I(top)->d_uid);
+	stat->gid = make_kgid(&init_user_ns, get_gid(mnt, SDCARDFS_I(top)));
+	stat->rdev = inode->i_rdev;
+	stat->size = i_size_read(inode);
+	stat->atime = inode->i_atime;
+	stat->mtime = inode->i_mtime;
+	stat->ctime = inode->i_ctime;
+	stat->blksize = 1 << inode->i_blkbits;
+	stat->blocks = inode->i_blocks;
 }
 
 static int sdcardfs_getattr(struct vfsmount *mnt, struct dentry *dentry,
@@ -662,29 +692,53 @@ static int sdcardfs_getattr(struct vfsmount *mnt, struct dentry *dentry,
 	fsstack_copy_inode_size(inode, lower_inode);
 
 
-	generic_fillattr(inode, stat);
+	if (!mnt || !mnt->data || !SDCARDFS_I(inode)->top) {
+		sdcardfs_put_lower_path(dentry, &lower_path);
+		return -EINVAL;
+	}
+	sdcardfs_fillattr(mnt, inode, stat);
 	sdcardfs_put_lower_path(dentry, &lower_path);
 	return 0;
 }
 
-static int sdcardfs_setattr(struct dentry *dentry, struct iattr *ia)
+static int sdcardfs_setattr_wrn(struct dentry *dentry, struct iattr *ia)
+{
+	WARN(1, "sdcardfs requires setattr2\n");
+	return -EINVAL;
+}
+
+static int sdcardfs_setattr(struct vfsmount *mnt, struct dentry *dentry,
+		struct iattr *ia)
 {
 	int err = 0;
 	struct dentry *lower_dentry;
+	struct vfsmount *lower_mnt;
 	struct inode *inode;
 	struct inode *lower_inode;
 	struct path lower_path;
 	struct iattr lower_ia;
 	struct dentry *parent;
+	struct inode tmp;
+	struct inode *top;
+	const struct cred *saved_cred = NULL;
 
 	inode = dentry->d_inode;
+	top = SDCARDFS_I(inode)->top;
+	if (!mnt || !mnt->data || !top)
+		return -EINVAL;
+	sdcardfs_copy_permission_attrs(&tmp, inode);
+	tmp.i_uid = make_kuid(&init_user_ns, SDCARDFS_I(top)->d_uid);
+	tmp.i_gid = make_kgid(&init_user_ns, get_gid(mnt, SDCARDFS_I(top)));
+	tmp.i_mode = (inode->i_mode & S_IFMT) |
+			get_mode(mnt, SDCARDFS_I(top));
+	tmp.i_size = i_size_read(inode);
 
 	/*
 	 * Check if user has permission to change inode.  We don't check if
 	 * this user can change the lower inode: that should happen when
 	 * calling notify_change on the lower inode.
 	 */
-	err = inode_change_ok(inode, ia);
+	err = inode_change_ok(&tmp, ia);
 
 	/* no vfs_XXX operations required, cred overriding will be skipped. wj*/
 	if (!err) {
@@ -702,8 +756,10 @@ static int sdcardfs_setattr(struct dentry *dentry, struct iattr *ia)
 	if (err)
 		goto out_err;
 
+	OVERRIDE_CRED(SDCARDFS_SB(dentry->d_sb), saved_cred);
 	sdcardfs_get_lower_path(dentry, &lower_path);
 	lower_dentry = lower_path.dentry;
+	lower_mnt = lower_path.mnt;
 	lower_inode = sdcardfs_lower_inode(inode);
 
 	/* prepare our own lower struct iattr (with the lower file) */
@@ -724,7 +780,7 @@ static int sdcardfs_setattr(struct dentry *dentry, struct iattr *ia)
 	if (current->mm)
 		down_write(&current->mm->mmap_sem);
 	if (ia->ia_valid & ATTR_SIZE) {
-		err = inode_newsize_ok(inode, ia->ia_size);
+		err = inode_newsize_ok(&tmp, ia->ia_size);
 		if (err) {
 			if (current->mm)
 				up_write(&current->mm->mmap_sem);
@@ -747,7 +803,7 @@ static int sdcardfs_setattr(struct dentry *dentry, struct iattr *ia)
 	 * tries to open(), unlink(), then ftruncate() a file.
 	 */
 	mutex_lock(&lower_dentry->d_inode->i_mutex);
-	err = notify_change(lower_dentry, &lower_ia); /* note: lower_ia */
+	err = notify_change2(lower_mnt, lower_dentry, &lower_ia);
 	mutex_unlock(&lower_dentry->d_inode->i_mutex);
 	if (current->mm)
 		up_write(&current->mm->mmap_sem);
@@ -765,13 +821,16 @@ static int sdcardfs_setattr(struct dentry *dentry, struct iattr *ia)
 
 out:
 	sdcardfs_put_lower_path(dentry, &lower_path);
+	REVERT_CRED(saved_cred);
 out_err:
 	return err;
 }
 
 const struct inode_operations sdcardfs_symlink_iops = {
-	.permission	= sdcardfs_permission,
-	.setattr	= sdcardfs_setattr,
+	.permission	= sdcardfs_permission_wrn,
+	.permission2	= sdcardfs_permission,
+	.setattr	= sdcardfs_setattr_wrn,
+	.setattr2	= sdcardfs_setattr,
 	/* XXX Following operations are implemented,
 	 *     but FUSE(sdcard) or FAT does not support them
 	 *     These methods are *NOT* perfectly tested.
@@ -784,12 +843,14 @@ const struct inode_operations sdcardfs_symlink_iops = {
 const struct inode_operations sdcardfs_dir_iops = {
 	.create		= sdcardfs_create,
 	.lookup		= sdcardfs_lookup,
-	.permission	= sdcardfs_permission,
+	.permission	= sdcardfs_permission_wrn,
+	.permission2	= sdcardfs_permission,
 	.unlink		= sdcardfs_unlink,
 	.mkdir		= sdcardfs_mkdir,
 	.rmdir		= sdcardfs_rmdir,
 	.rename		= sdcardfs_rename,
-	.setattr	= sdcardfs_setattr,
+	.setattr	= sdcardfs_setattr_wrn,
+	.setattr2	= sdcardfs_setattr,
 	.getattr	= sdcardfs_getattr,
 	/* XXX Following operations are implemented,
 	 *     but FUSE(sdcard) or FAT does not support them
@@ -801,7 +862,9 @@ const struct inode_operations sdcardfs_dir_iops = {
 };
 
 const struct inode_operations sdcardfs_main_iops = {
-	.permission	= sdcardfs_permission,
-	.setattr	= sdcardfs_setattr,
+	.permission	= sdcardfs_permission_wrn,
+	.permission2	= sdcardfs_permission,
+	.setattr	= sdcardfs_setattr_wrn,
+	.setattr2	= sdcardfs_setattr,
 	.getattr	= sdcardfs_getattr,
 };

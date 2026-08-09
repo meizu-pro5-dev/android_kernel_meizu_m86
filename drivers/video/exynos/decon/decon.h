@@ -386,6 +386,14 @@ struct decon_win_config {
 			struct vpp_params		vpp_parm;
 			/* no read area of IDMA */
 			struct decon_win_rect		block_area;
+			/*
+			 * Keep the userspace ABI aligned with Samsung's Exynos 7420
+			 * HWC.  These regions are part of decon-fb.h used by
+			 * libexynosdisplay; omitting them changes both the following
+			 * member offsets and the size encoded in S3CFB_WIN_CONFIG.
+			 */
+			struct decon_win_rect		transparent_area;
+			struct decon_win_rect		opaque_area;
 			/* source framebuffer coordinates */
 			struct decon_frame		src;
 		};

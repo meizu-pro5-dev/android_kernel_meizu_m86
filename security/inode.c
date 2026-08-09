@@ -105,7 +105,7 @@ struct dentry *securityfs_create_file(const char *name, umode_t mode,
 	dir = parent->d_inode;
 
 	mutex_lock(&dir->i_mutex);
-	dentry = lookup_one_len(name, parent, strlen(name));
+	dentry = lookup_one_len2(name, mount, parent, strlen(name));
 	if (IS_ERR(dentry))
 		goto out;
 
@@ -233,4 +233,3 @@ static int __init securityfs_init(void)
 
 core_initcall(securityfs_init);
 MODULE_LICENSE("GPL");
-

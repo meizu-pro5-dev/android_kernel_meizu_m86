@@ -108,6 +108,31 @@ static int sdcardfs_remount_fs(struct super_block *sb, int *flags, char *options
 	return err;
 }
 
+static int sdcardfs_remount_fs2(struct vfsmount *mnt,
+		struct super_block *sb, int *flags, char *options)
+{
+	if ((*flags & ~(MS_RDONLY | MS_MANDLOCK | MS_SILENT | MS_REMOUNT)) != 0)
+		return -EINVAL;
+	return parse_options_remount(sb, options, *flags & ~MS_SILENT,
+			mnt->data);
+}
+
+static void *sdcardfs_clone_mnt_data(void *data)
+{
+	struct sdcardfs_vfsmount_options *new;
+
+	new = kmalloc(sizeof(*new), GFP_KERNEL);
+	if (!new)
+		return NULL;
+	memcpy(new, data, sizeof(*new));
+	return new;
+}
+
+static void sdcardfs_copy_mnt_data(void *data, void *newdata)
+{
+	memcpy(data, newdata, sizeof(struct sdcardfs_vfsmount_options));
+}
+
 /*
  * Called by iput() when the inode reference count reached zero
  * and the inode is not hashed anywhere.  Used to clear anything
@@ -190,10 +215,12 @@ static void sdcardfs_umount_begin(struct super_block *sb)
 		lower_sb->s_op->umount_begin(lower_sb);
 }
 
-static int sdcardfs_show_options(struct seq_file *m, struct dentry *root)
+static int sdcardfs_show_options(struct vfsmount *mnt, struct seq_file *m,
+		struct dentry *root)
 {
 	struct sdcardfs_sb_info *sbi = SDCARDFS_SB(root->d_sb);
 	struct sdcardfs_mount_options *opts = &sbi->options;
+	struct sdcardfs_vfsmount_options *vfsopts = mnt->data;
 
 	if (opts->fs_low_uid != 0)
 		seq_printf(m, ",fsuid=%u", opts->fs_low_uid);
@@ -203,14 +230,23 @@ static int sdcardfs_show_options(struct seq_file *m, struct dentry *root)
 	if (opts->multiuser)
 		seq_printf(m, ",multiuser");
 
-	if (opts->mask)
-		seq_printf(m, ",mask=%u", opts->mask);
+	if (vfsopts->mask)
+		seq_printf(m, ",mask=%u", vfsopts->mask);
 
-	if (opts->gid)
-		seq_printf(m, ",gid=%u", opts->gid);
+	if (vfsopts->gid)
+		seq_printf(m, ",gid=%u", vfsopts->gid);
 
 	if (opts->fs_user_id)
 		seq_printf(m, ",userid=%d", opts->fs_user_id);
+
+	if (opts->gid_derivation)
+		seq_puts(m, ",derive_gid");
+
+	if (opts->default_normal)
+		seq_puts(m, ",default_normal");
+
+	if (opts->unshared_obb)
+		seq_puts(m, ",unshared_obb");
 
 	if (opts->reserved_mb != 0)
 		seq_printf(m, ",reserved=%uMB", opts->reserved_mb);
@@ -222,9 +258,12 @@ const struct super_operations sdcardfs_sops = {
 	.put_super	= sdcardfs_put_super,
 	.statfs		= sdcardfs_statfs,
 	.remount_fs	= sdcardfs_remount_fs,
+	.remount_fs2	= sdcardfs_remount_fs2,
+	.clone_mnt_data	= sdcardfs_clone_mnt_data,
+	.copy_mnt_data	= sdcardfs_copy_mnt_data,
 	.evict_inode	= sdcardfs_evict_inode,
 	.umount_begin	= sdcardfs_umount_begin,
-	.show_options	= sdcardfs_show_options,
+	.show_options2	= sdcardfs_show_options,
 	.alloc_inode	= sdcardfs_alloc_inode,
 	.destroy_inode	= sdcardfs_destroy_inode,
 	.drop_inode	= generic_delete_inode,

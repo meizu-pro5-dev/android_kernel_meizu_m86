@@ -359,3 +359,29 @@ int propagate_umount(struct list_head *list)
 		__propagate_umount(mnt);
 	return 0;
 }
+
+int propagate_remount(struct mount *mnt) {
+	struct mount *parent = mnt->mnt_parent;
+	struct mount *p, *m;
+	struct super_block *sb = mnt->mnt.mnt_sb;
+	int ret = 0;
+
+	if (!sb->s_op->copy_mnt_data)
+		return ret;
+
+	/*
+	 * The mount being remounted is usually a child of a shared mount.
+	 * Its replicas in other namespaces are therefore children of the
+	 * parent's propagation peers/slaves, not slaves of the child itself.
+	 * Walk the parent's propagation tree and copy the per-mount data to
+	 * the child mounted at the corresponding mountpoint.
+	 */
+	for (p = propagation_next(parent, parent); p;
+	     p = propagation_next(p, parent)) {
+		m = __lookup_mnt(&p->mnt, mnt->mnt_mountpoint, 0);
+		if (m)
+			sb->s_op->copy_mnt_data(m->mnt.data, mnt->mnt.data);
+	}
+
+	return ret;
+}

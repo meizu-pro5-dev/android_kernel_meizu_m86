@@ -1495,10 +1495,18 @@ static ssize_t enable_store(struct device *pdev, struct device_attribute *attr,
 				f->enable(f);
 		}
 
-		if (dev->usb_attach) {
-			wake_lock(&dev->wakelock);
-			dwc3_exynos_vbus_event(NULL, 1);
-		}
+		/*
+		 * Recovery can classify an attached USB host as a charger before
+		 * the MUIC notifier reports USB_HOST_ATTACH.  In that case
+		 * usb_attach remains false and DWC3 never enters its gadget
+		 * session, so the host cannot enumerate even an ADB-only setup.
+		 * Userspace enabling android_usb is sufficient intent to prepare
+		 * the device side; a later notifier event remains harmless.
+		 */
+		wake_lock(&dev->wakelock);
+		if (!dev->usb_attach)
+			pr_info("android_usb: forcing DWC3 gadget VBUS session\n");
+		dwc3_exynos_vbus_event(NULL, 1);
 
 		android_enable(dev);
 		dev->enabled = true;

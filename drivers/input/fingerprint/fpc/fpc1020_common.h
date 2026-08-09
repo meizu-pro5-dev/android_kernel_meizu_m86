@@ -52,6 +52,12 @@ extern unsigned int enable_keys;
 #define FPC1020_BUFFER_MAX_IMAGES		3
 
 
+/*
+ * Keep the legacy interrupt fields enabled: several vendor paths reference
+ * them outside their original conditional blocks. SPI security itself is
+ * selected by the parent DT node; the Lineage hybrid DTB removes secure-mode
+ * and therefore still runs image capture through the non-secure AP path.
+ */
 #define FPC_TEE_INTERRUPT_ONLY
 
 #ifdef VENDOR_EDIT
@@ -423,4 +429,3 @@ extern int fpc1020_set_finger_detect_threshold(fpc1020_data_t *fpc1020,
 #define FPC1020_FINGER_DETECT_ZONE_MASK		0x0FFFU
 
 #endif /* LINUX_SPI_FPC1020_COMMON_H */
-
