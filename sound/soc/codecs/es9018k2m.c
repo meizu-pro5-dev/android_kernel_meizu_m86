@@ -79,28 +79,44 @@ static const struct reg_default es9018k2m_reg_defaults[] = {
 };
 
 #ifdef FIR_ENA
-/* FIR COEFF DATA  */
-static  int es9018k2m_fir_coeff_stage1[128] = {
-	20,50,-32,-136,-2,314,114,-576,-416,933,1017,-1315,-2089,1602,3795,-1551,-6301,806,9699,1140,-13962,-4923,
-	18859,11289,-23887,-21023,28185,34863,-30489,-53363,29093,76748,-21865,-104733,6296,136353,20406,-169789,
-	-61181,202210,118977,-229618,-196622,246669,296758,-246377,-421910,219531,574791,-153378,-759012,28556,980458,
-	188612,-1249634,-567680,1583619,1285814,-1985753,-2936870,2081023,8388607,8388607,2081023,-2936870,-1985753,
-	1285814,1583619,-567680,-1249634,188612,980458,28556,-759012,-153378,574791,219531,-421910,-246377,296758,
-	246669,-196622,-229618,118977,202210,-61181,-169789,20406,136353,6296,-104733,-21865,76748,29093,-53363,-30489,
-	34863,28185,-21023,-23887,11289,18859,-4923,-13962,1140,9699,806,-6301,-1551,3795,1602,-2089,-1315,1017,933,
-	-416,-576,114,314,-2,-136,-32,50,20,0,0,0,0
+/*
+ * Flyme OS 5.1.2.0A user FIR, mirrored from /etc/firmware/stage{1,2}.txt.
+ * Keep the in-kernel copy byte-for-value equivalent so HiFi still has the
+ * intended filter if Android's firmware loader is unavailable during boot.
+ * stage1 SHA-256: 4706f3622459cd55d0f881f3fe1eea73fd465c28a266039efb6b6edc31b4ec2c
+ * stage2 SHA-256: 2950bfd8c78d6f84acf3fa883e5901adae68c1bf10d216b0495648c8caa96772
+ */
+static const int es9018k2m_fir_coeff_stage1[128] = {
+	3, -311, -598, -252, 793, 861, -804, -1836,
+	409, 3051, 742, -4297, -2885, 5108, 6187, -4881,
+	-10547, 2855, 15558, 1721, -20381, -9464, 23759, 20616,
+	-24041, -34855, 19365, 51077, -7882, -67284, -11882, 80554,
+	40653, -87165, -77990, 82861, 121942, -63283, -168781, 24498,
+	212903, 36377, -246867, -120579, 261594, 227137, -246607, -352448,
+	190163, 489915, -78901, -629544, -103690, 756883, 381738, -849479,
+	-799238, 863537, 1456648, -673704, -2640570, -320086, 5331246, 8388607,
+	5331246, -320086, -2640570, -673704, 1456648, 863537, -799238, -849479,
+	381738, 756883, -103690, -629544, -78901, 489915, 190163, -352448,
+	-246607, 227137, 261594, -120579, -246867, 36377, 212903, 24498,
+	-168781, -63283, 121942, 82861, -77990, -87165, 40653, 80554,
+	-11882, -67284, -7882, 51077, 19365, -34855, -24041, 20616,
+	23759, -9464, -20381, 1721, 15558, 2855, -10547, -4881,
+	6187, 5108, -2885, -4297, 742, 3051, 409, -1836,
+	-804, 861, 793, -252, -598, -311, 3, 0
 };
 
-static  int es9018k2m_fir_coeff_stage2[16] = {
-	548,3848,15950,49995,128081,280835,541717,934837,1461225,2086382,2737232,3314135,3713180,3855803,0,0
+static const int es9018k2m_fir_coeff_stage2[16] = {
+	0, 0, 2725, 16497, 60953, 171433, 393618, 773372,
+	1332567, 2045216, 2828936, 3549914, 4060791, 4246290, 0, 0
 };
 
-static int es9018k2m_get_FIR_coeff(struct snd_soc_codec *codec, char * path,int * coeff, int size)
+static int es9018k2m_get_FIR_coeff(struct snd_soc_codec *codec,
+		const char *path, int *coeff, int size)
 {
-
 	const struct firmware *fw_stage = NULL;
-	const u8 *p;
-	int *fir_data;
+	char *buffer;
+	char *cursor;
+	char *line;
 	int i = 0;
 	int ret = 0;
 
@@ -116,23 +132,35 @@ static int es9018k2m_get_FIR_coeff(struct snd_soc_codec *codec, char * path,int 
 	}
 	pr_info("ess9018 custom FIR data size	= %ld\n",fw_stage->size);
 
-	p = fw_stage->data;
-	fir_data = coeff;
+	buffer = kzalloc(fw_stage->size + 1, GFP_KERNEL);
+	if (!buffer) {
+		ret = -ENOMEM;
+		goto out_release;
+	}
+	memcpy(buffer, fw_stage->data, fw_stage->size);
+	cursor = buffer;
 
-	do {
-		sscanf(p,"%d",fir_data);
-		p = strchr(p,'\n');
-		if ( p != NULL) {
-			p++;
-			fir_data++;
-		} else {
-
-		}
-	} while( p < (fw_stage->data + fw_stage->size));
+	while ((line = strsep(&cursor, "\n")) != NULL && i < size) {
+		if (!*line)
+			continue;
+		ret = kstrtoint(line, 10, &coeff[i]);
+		if (ret)
+			goto out_free;
+		i++;
+	}
+	if (i != size) {
+		pr_err("ess9018: FIR %s has %d coefficients, expected %d\n",
+			path, i, size);
+		ret = -EINVAL;
+		goto out_free;
+	}
 
 	for (i = 0;i < size;i++)
 	pr_debug("ess9018: %d :%d\n",i,coeff[i]);
 
+out_free:
+	kfree(buffer);
+out_release:
 	release_firmware(fw_stage);
 
 	return ret;
@@ -696,7 +724,7 @@ static int es9018k2m_put_custom_fir_enum(struct snd_kcontrol *kcontrol,
 	struct es9018k2m_priv *es9018k2m = snd_soc_codec_get_drvdata(codec);
 	unsigned int value;
 	int ret = 0;
-	int *data;
+	const int *data;
 
 	value = ucontrol->value.enumerated.item[0];
 
@@ -1474,4 +1502,3 @@ module_exit(es9018k2m_exit);
 MODULE_DESCRIPTION("ASoC ES9018K2M driver");
 MODULE_AUTHOR("linfeng@meizu.com");
 MODULE_LICENSE("GPL");
-
