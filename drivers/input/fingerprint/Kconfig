@@ -24,4 +24,14 @@ config INPUT_FINGERPRINT_FPC
 
 source "drivers/input/fingerprint/fpc/Kconfig"
 
+config FINGERPRINT_FPC_TEE
+	tristate "FPC fingerprint TEE IRQ bridge"
+	depends on SPI_MASTER
+	default n
+	help
+	  Expose the IRQ, wakeup, clock and secure-OS boost controls used by
+	  the production FPC Trustonic userspace. Sensor capture and matching
+	  remain inside the trusted application; normal-world SPI transfers
+	  are deliberately not exposed.
+
 endif

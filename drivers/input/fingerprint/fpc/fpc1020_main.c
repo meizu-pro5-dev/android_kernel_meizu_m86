@@ -223,6 +223,13 @@ static const struct dev_pm_ops fpc1020_pm = {
 
 static struct of_device_id fpc1020_of_match[] /*__devinitdata*/ = {
 	{ .compatible = "fpc,fpc1020", },
+	/*
+	 * The boot-proven Flyme DT names the same FPC1150 transport fpc_irq.
+	 * The default m86 product removes SPI4 secure-mode from that hash-locked
+	 * tree and selects only this AP navigation backend.  The mutually
+	 * exclusive fingerprint experiment instead selects fpc_tee.
+	 */
+	{ .compatible = "fpc,fpc_irq", },
 	{}
 };
 
@@ -1691,10 +1698,14 @@ of_err:
 	struct device_node *node = dev->of_node;
 
 	pdata->irq_gpio= of_get_named_gpio(node, "fpc,gpio_irq", 0);
+	if (!gpio_is_valid(pdata->irq_gpio))
+		pdata->irq_gpio= of_get_named_gpio(node, "gx,gpio_irq", 0);
 	if ((!gpio_is_valid(pdata->irq_gpio)))
 		return -EINVAL;
 
 	pdata->reset_gpio= of_get_named_gpio(node, "fpc,gpio_reset", 0);
+	if (!gpio_is_valid(pdata->reset_gpio))
+		pdata->reset_gpio= of_get_named_gpio(node, "gx,gpio_reset", 0);
 	if ((!gpio_is_valid(pdata->reset_gpio)))
 		return -EINVAL;
 
@@ -2915,5 +2926,4 @@ static int fpc1020_start_navigation(fpc1020_data_t *fpc1020)
 
 
 /* -------------------------------------------------------------------- */
-
 
