@@ -1620,7 +1620,12 @@ EXPORT_SYMBOL(wifi_pm);
 int dtim_awake = 0;
 module_param(dtim_awake, int, 0660);
 
-int dtim_suspended = 0;
+/*
+ * Keep the screen-off beacon listen interval aligned with the driver default.
+ * A zero here is pushed directly to firmware by dhd_set_suspend(), bypassing
+ * CUSTOM_SUSPEND_BCN_LI_DTIM and causing unstable station links on m86.
+ */
+int dtim_suspended = CUSTOM_SUSPEND_BCN_LI_DTIM;
 module_param(dtim_suspended, int, 0660);
 
 int wifi_pm_awake = PM_FAST;
