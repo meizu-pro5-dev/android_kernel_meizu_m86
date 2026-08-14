@@ -70,7 +70,16 @@ static int fpc_tee_set_clocks(struct fpc_tee_data *fpc, bool enable)
 			pm_runtime_put_noidle(&sdd->pdev->dev);
 			goto out;
 		}
-		ret = clk_set_rate(sdd->src_clk, fpc->spi->max_speed_hz * 2);
+		/*
+		 * The FPC1020 sensor runs its SPI at 4.8 MHz: the raw fpc1020
+		 * driver uses chip.spi_max_khz = 4800 and the sensor answers
+		 * reliably at that rate.  The DTS entry (16 MHz) is only the
+		 * controller upper bound; driving the sensor at that rate makes
+		 * the FPC trustlet report FPC_ERROR_RESET_HARDWARE.  Set the
+		 * source to twice the sensor clock so the controller divider
+		 * produces exactly 4.8 MHz.
+		 */
+		ret = clk_set_rate(sdd->src_clk, 4800000u * 2);
 		if (ret) {
 			pm_runtime_put(&sdd->pdev->dev);
 			goto out;
