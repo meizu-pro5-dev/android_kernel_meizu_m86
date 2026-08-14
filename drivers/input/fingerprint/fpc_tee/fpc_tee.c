@@ -3,12 +3,15 @@
  *
  * The production FPC HAL does not transfer sensor frames through Linux.
  * It talks to the 0401 Trustonic TA and uses these SPI-device sysfs files
- * solely for IRQ notification, wakeup, SPI clocks and secure-OS boosting.
+ * solely for IRQ notification, wakeup, SPI clocks and CPU/MIF/INT boosting.
+ * The sysfs semantics mirror the stock m86 fpc_irq driver (verified against
+ * the Flyme 8 kernel.elf and the Meizu m576 fpc_irq source): the irq write
+ * is a no-op ack, the handler only notifies, and lock_freq raises four PM
+ * QoS requests for 500 ms instead of using the secure-OS booster.
  */
 
 #include <linux/atomic.h>
 #include <linux/clk.h>
-#include <linux/completion.h>
 #include <linux/delay.h>
 #include <linux/gpio.h>
 #include <linux/interrupt.h>
@@ -18,29 +21,36 @@
 #include <linux/of_gpio.h>
 #include <linux/platform_device.h>
 #include <linux/platform_data/spi-s3c64xx.h>
+#include <linux/pm_qos.h>
 #include <linux/pm_runtime.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 #include <linux/spi/spi.h>
 #include <linux/wakelock.h>
 
-#ifdef CONFIG_SECURE_OS_BOOSTER_API
-#include <linux/soc/samsung/secos_booster.h>
-#endif
-
 #define FPC_TTW_HOLD_TIME_MS 1000
+
+/* Stock fpc_irq HMP boost parameters (m576 fpc_irq_main.c). */
+#define HMP_BOOST_TIMEOUT_US (500 * MSEC_PER_SEC)
+#define BIG_CORE_NUM 2
+#define HMP_BOOST_FREQ 1500000
+#define HMP_MIF_FREQ 1552000
+#define HMP_INT_FREQ 560000
+
+static struct pm_qos_request fp_cpu_num_min_qos;
+static struct pm_qos_request fp_cpu_freq_qos;
+static struct pm_qos_request fp_cpu_mif_qos;
+static struct pm_qos_request fp_cpu_int_qos;
 
 struct fpc_tee_data {
 	struct spi_device *spi;
 	struct mutex lock;
 	struct wake_lock ttw_wake_lock;
-	struct completion irq_sent;
 	struct regulator *vdd28_fp;
 	atomic_t wakeup_enabled;
 	int irq_gpio;
 	int reset_gpio;
 	bool clocks_enabled;
-	bool boost_locked;
 };
 
 static int fpc_tee_named_gpio(struct device_node *node, const char *primary,
@@ -104,19 +114,10 @@ static ssize_t irq_show(struct device *dev, struct device_attribute *attr,
 			char *buf)
 {
 	struct fpc_tee_data *fpc = dev_get_drvdata(dev);
-	ssize_t count;
 
-	count = scnprintf(buf, PAGE_SIZE, "%d\n",
-			  gpio_get_value(fpc->irq_gpio));
-
-	/*
-	 * Production FPC IRQ protocol: the threaded handler holds the ONESHOT
-	 * IRQ masked until userland has consumed the notification, so ack it
-	 * on read exactly like the stock fpc_irq driver does.
-	 */
-	complete(&fpc->irq_sent);
-
-	return count;
+	/* The stock fpc_irq driver just reports the GPIO state on read. */
+	return scnprintf(buf, PAGE_SIZE, "%d\n",
+			 gpio_get_value(fpc->irq_gpio));
 }
 
 /*
@@ -188,9 +189,7 @@ static ssize_t lock_freq_store(struct device *dev,
 			       struct device_attribute *attr,
 			       const char *buf, size_t count)
 {
-	struct fpc_tee_data *fpc = dev_get_drvdata(dev);
 	bool lock;
-	int ret = 0;
 
 	if (sysfs_streq(buf, "lock"))
 		lock = true;
@@ -199,18 +198,29 @@ static ssize_t lock_freq_store(struct device *dev,
 	else
 		return -EINVAL;
 
-	mutex_lock(&fpc->lock);
-	if (lock != fpc->boost_locked) {
-#ifdef CONFIG_SECURE_OS_BOOSTER_API
-		ret = lock ? secos_booster_start(MAX_PERFORMANCE) :
-			secos_booster_stop();
-#endif
-		if (!ret)
-			fpc->boost_locked = lock;
+	/*
+	 * Stock fpc_irq lock_freq: raise two big-core, MIF and INT PM QoS
+	 * requests for 500 ms on every lock (the HAL re-arms it before each
+	 * capture); unlock drops them immediately.  The secure-OS booster is
+	 * not used by the stock driver.
+	 */
+	if (lock) {
+		pm_qos_update_request_timeout(&fp_cpu_num_min_qos, BIG_CORE_NUM,
+					      HMP_BOOST_TIMEOUT_US);
+		pm_qos_update_request_timeout(&fp_cpu_freq_qos, HMP_BOOST_FREQ,
+					      HMP_BOOST_TIMEOUT_US);
+		pm_qos_update_request_timeout(&fp_cpu_mif_qos, HMP_MIF_FREQ,
+					      HMP_BOOST_TIMEOUT_US);
+		pm_qos_update_request_timeout(&fp_cpu_int_qos, HMP_INT_FREQ,
+					      HMP_BOOST_TIMEOUT_US);
+	} else {
+		pm_qos_update_request(&fp_cpu_num_min_qos, 0);
+		pm_qos_update_request(&fp_cpu_freq_qos, 0);
+		pm_qos_update_request(&fp_cpu_mif_qos, 0);
+		pm_qos_update_request(&fp_cpu_int_qos, 0);
 	}
-	mutex_unlock(&fpc->lock);
 
-	return ret ? ret : count;
+	return count;
 }
 
 static ssize_t hw_reset_store(struct device *dev,
@@ -256,19 +266,17 @@ static irqreturn_t fpc_tee_irq_handler(int irq, void *handle)
 {
 	struct fpc_tee_data *fpc = handle;
 
+	/*
+	 * Stock fpc_irq handler: wakeup hold + sysfs_notify only.  No
+	 * completion handshake; the HAL re-arms the line by polling and
+	 * reading the irq node, and blocking here would delay the TEE's
+	 * secure-SPI transfers.
+	 */
 	if (atomic_read(&fpc->wakeup_enabled))
 		wake_lock_timeout(&fpc->ttw_wake_lock,
 				  msecs_to_jiffies(FPC_TTW_HOLD_TIME_MS));
 
 	sysfs_notify(&fpc->spi->dev.kobj, NULL, dev_attr_irq.attr.name);
-
-	/*
-	 * Keep the ONESHOT IRQ masked until the HAL reads the irq node, which
-	 * acks through irq_show().  The stock fpc_irq driver does the same
-	 * with a 100 ms cap so a dead HAL cannot wedge the sensor IRQ line.
-	 */
-	INIT_COMPLETION(fpc->irq_sent);
-	wait_for_completion_timeout(&fpc->irq_sent, msecs_to_jiffies(100));
 
 	return IRQ_HANDLED;
 }
@@ -333,9 +341,12 @@ static int fpc_tee_probe(struct spi_device *spi)
 		return spi->irq;
 
 	mutex_init(&fpc->lock);
-	init_completion(&fpc->irq_sent);
 	atomic_set(&fpc->wakeup_enabled, 0);
 	wake_lock_init(&fpc->ttw_wake_lock, WAKE_LOCK_SUSPEND, "fpc_ttw_wl");
+	pm_qos_add_request(&fp_cpu_num_min_qos, PM_QOS_CLUSTER0_NUM_MIN, 0);
+	pm_qos_add_request(&fp_cpu_freq_qos, PM_QOS_CLUSTER0_FREQ_MIN, 0);
+	pm_qos_add_request(&fp_cpu_mif_qos, PM_QOS_BUS_THROUGHPUT, 0);
+	pm_qos_add_request(&fp_cpu_int_qos, PM_QOS_DEVICE_THROUGHPUT, 0);
 	spi_set_drvdata(spi, fpc);
 
 	ret = devm_request_threaded_irq(dev, spi->irq, NULL,
@@ -370,10 +381,14 @@ static int fpc_tee_remove(struct spi_device *spi)
 		regulator_disable(fpc->vdd28_fp);
 		regulator_put(fpc->vdd28_fp);
 	}
-#ifdef CONFIG_SECURE_OS_BOOSTER_API
-	if (fpc->boost_locked)
-		secos_booster_stop();
-#endif
+	pm_qos_update_request(&fp_cpu_num_min_qos, 0);
+	pm_qos_update_request(&fp_cpu_freq_qos, 0);
+	pm_qos_update_request(&fp_cpu_mif_qos, 0);
+	pm_qos_update_request(&fp_cpu_int_qos, 0);
+	pm_qos_remove_request(&fp_cpu_num_min_qos);
+	pm_qos_remove_request(&fp_cpu_freq_qos);
+	pm_qos_remove_request(&fp_cpu_mif_qos);
+	pm_qos_remove_request(&fp_cpu_int_qos);
 	wake_lock_destroy(&fpc->ttw_wake_lock);
 	return 0;
 }
