@@ -122,6 +122,7 @@ struct pn544_dev {
 	bool nfc_ven_enabled;	/* stores the VEN pin state powered by Nfc */
 	bool spi_ven_enabled;	/* stores the VEN pin state powered by Spi */
 	bool irq_enabled;
+	bool irq_wake_enabled;
 	spinlock_t irq_enabled_lock;
 	long nfc_service_pid;	/*used to signal the nfc the nfc service */
 	struct wake_lock wake_lock;
@@ -139,6 +140,37 @@ static void pn544_disable_irq(struct pn544_dev *pn544_dev)
 		pn544_dev->irq_enabled = false;
 	}
 	spin_unlock_irqrestore(&pn544_dev->irq_enabled_lock, flags);
+}
+
+/*
+ * PN544_SET_PWR is serialized by p61_state_mutex.  Track the wake reference
+ * separately from the data IRQ state so repeated power-off requests cannot
+ * underflow irq_set_irq_wake()'s reference count.
+ */
+static void pn544_enable_irq_wake(struct pn544_dev *pn544_dev)
+{
+	int ret;
+
+	if (pn544_dev->irq_wake_enabled)
+		return;
+
+	ret = enable_irq_wake(pn544_dev->client->irq);
+	if (ret) {
+		dev_warn(&pn544_dev->client->dev,
+			 "enable_irq_wake failed: %d\n", ret);
+		return;
+	}
+
+	pn544_dev->irq_wake_enabled = true;
+}
+
+static void pn544_disable_irq_wake(struct pn544_dev *pn544_dev)
+{
+	if (!pn544_dev->irq_wake_enabled)
+		return;
+
+	disable_irq_wake(pn544_dev->client->irq);
+	pn544_dev->irq_wake_enabled = false;
 }
 
 static irqreturn_t pn544_dev_irq_handler(int irq, void *dev_id)
@@ -370,7 +402,7 @@ static long pn544_dev_ioctl(struct file *filp, unsigned int cmd,
 				gpio_set_value(pn544_dev->ven_gpio, 1);
 				msleep(20);
 			}
-			enable_irq_wake(pn544_dev->client->irq);
+			pn544_enable_irq_wake(pn544_dev);
 		} else if (arg == 1) {
 			/* power on */
 			pr_info("%s power on\n", __func__);
@@ -383,7 +415,7 @@ static long pn544_dev_ioctl(struct file *filp, unsigned int cmd,
 				gpio_set_value(pn544_dev->ven_gpio, 1);
 				msleep(100);
 			}
-			enable_irq_wake(pn544_dev->client->irq);
+			pn544_enable_irq_wake(pn544_dev);
 		} else if (arg == 0) {
 			/* power off */
 			pr_info("%s power off\n", __func__);
@@ -397,7 +429,7 @@ static long pn544_dev_ioctl(struct file *filp, unsigned int cmd,
 				gpio_set_value(pn544_dev->ven_gpio, 0);
 				msleep(100);
 			}
-			disable_irq_wake(pn544_dev->client->irq);
+			pn544_disable_irq_wake(pn544_dev);
 		} else {
 			pr_err("%s bad arg %lu\n", __func__, arg);
 			/* changed the p61 state to idle */
@@ -683,6 +715,7 @@ static int pn544_probe(struct i2c_client *client,
 	pn544_dev->p61_current_state = P61_STATE_IDLE;
 	pn544_dev->nfc_ven_enabled = false;
 	pn544_dev->spi_ven_enabled = false;
+	pn544_dev->irq_wake_enabled = false;
 	pn544_dev->client = client;
 	client->irq = gpio_to_irq(pn544_dev->irq_gpio);
 
@@ -757,6 +790,9 @@ static int pn544_remove(struct i2c_client *client)
 	struct pn544_dev *pn544_dev;
 
 	pn544_dev = i2c_get_clientdata(client);
+	p61_access_lock(pn544_dev);
+	pn544_disable_irq_wake(pn544_dev);
+	p61_access_unlock(pn544_dev);
 	free_irq(client->irq, pn544_dev);
 	misc_deregister(&pn544_dev->pn544_device);
 	unregister_pm_notifier(&pn544_dev->pm_notifier);
@@ -781,6 +817,9 @@ static void pn544_shutdown(struct i2c_client *client)
 {
 	struct pn544_dev *pn544_dev = i2c_get_clientdata(client);
 
+	p61_access_lock(pn544_dev);
+	pn544_disable_irq_wake(pn544_dev);
+	p61_access_unlock(pn544_dev);
 	gpio_direction_output(pn544_dev->ven_gpio, 0);
 	regulator_disable(pn544_dev->vdd18_nfc);
 
