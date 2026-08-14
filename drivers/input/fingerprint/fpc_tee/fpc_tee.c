@@ -19,6 +19,7 @@
 #include <linux/platform_device.h>
 #include <linux/platform_data/spi-s3c64xx.h>
 #include <linux/pm_runtime.h>
+#include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 #include <linux/spi/spi.h>
 #include <linux/wakelock.h>
@@ -34,6 +35,7 @@ struct fpc_tee_data {
 	struct mutex lock;
 	struct wake_lock ttw_wake_lock;
 	struct completion irq_sent;
+	struct regulator *vdd28_fp;
 	atomic_t wakeup_enabled;
 	int irq_gpio;
 	int reset_gpio;
@@ -305,6 +307,27 @@ static int fpc_tee_probe(struct spi_device *spi)
 			return ret;
 	}
 
+	/*
+	 * Power the sensor's 2.8 V rail (L22).  The production FPC TEE
+	 * drivers manage their regulators (vcc_spi/vdd) and the m86 raw
+	 * fpc1020 driver enables the same vdd28_fp L22 at probe; without it
+	 * the FPC1020 only works if the boot defaults happen to leave the
+	 * rail on.  Treat a missing regulator as non-fatal: some DTS variants
+	 * may not expose it under this name.
+	 */
+	fpc->vdd28_fp = regulator_get(dev, "vdd28_fp");
+	if (IS_ERR(fpc->vdd28_fp)) {
+		dev_info(dev, "no vdd28_fp regulator (%ld); relying on boot state\n",
+			 PTR_ERR(fpc->vdd28_fp));
+		fpc->vdd28_fp = NULL;
+	} else if (regulator_enable(fpc->vdd28_fp)) {
+		dev_warn(dev, "failed to enable vdd28_fp\n");
+		regulator_put(fpc->vdd28_fp);
+		fpc->vdd28_fp = NULL;
+	} else {
+		dev_info(dev, "enabled vdd28_fp sensor supply\n");
+	}
+
 	spi->irq = gpio_to_irq(fpc->irq_gpio);
 	if (spi->irq < 0)
 		return spi->irq;
@@ -343,6 +366,10 @@ static int fpc_tee_remove(struct spi_device *spi)
 		disable_irq_wake(spi->irq);
 	if (fpc->clocks_enabled)
 		fpc_tee_set_clocks(fpc, false);
+	if (fpc->vdd28_fp) {
+		regulator_disable(fpc->vdd28_fp);
+		regulator_put(fpc->vdd28_fp);
+	}
 #ifdef CONFIG_SECURE_OS_BOOSTER_API
 	if (fpc->boost_locked)
 		secos_booster_stop();
