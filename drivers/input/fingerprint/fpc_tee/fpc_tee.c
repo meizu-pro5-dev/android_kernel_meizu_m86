@@ -8,6 +8,7 @@
 
 #include <linux/atomic.h>
 #include <linux/clk.h>
+#include <linux/completion.h>
 #include <linux/delay.h>
 #include <linux/gpio.h>
 #include <linux/interrupt.h>
@@ -32,6 +33,7 @@ struct fpc_tee_data {
 	struct spi_device *spi;
 	struct mutex lock;
 	struct wake_lock ttw_wake_lock;
+	struct completion irq_sent;
 	atomic_t wakeup_enabled;
 	int irq_gpio;
 	int reset_gpio;
@@ -100,8 +102,31 @@ static ssize_t irq_show(struct device *dev, struct device_attribute *attr,
 			char *buf)
 {
 	struct fpc_tee_data *fpc = dev_get_drvdata(dev);
+	ssize_t count;
 
-	return scnprintf(buf, PAGE_SIZE, "%d\n", gpio_get_value(fpc->irq_gpio));
+	count = scnprintf(buf, PAGE_SIZE, "%d\n",
+			  gpio_get_value(fpc->irq_gpio));
+
+	/*
+	 * Production FPC IRQ protocol: the threaded handler holds the ONESHOT
+	 * IRQ masked until userland has consumed the notification, so ack it
+	 * on read exactly like the stock fpc_irq driver does.
+	 */
+	complete(&fpc->irq_sent);
+
+	return count;
+}
+
+/*
+ * The FPC HAL opens this node read-write; its write is only an IRQ ack for
+ * latency measurement in the production fpc_irq driver, so consume the write
+ * and report success.
+ */
+static ssize_t irq_store(struct device *dev, struct device_attribute *attr,
+			 const char *buf, size_t count)
+{
+	dev_dbg(dev, "%s\n", __func__);
+	return count;
 }
 
 static ssize_t wakeup_enable_store(struct device *dev,
@@ -205,7 +230,7 @@ static ssize_t hw_reset_store(struct device *dev,
 	return count;
 }
 
-static DEVICE_ATTR(irq, S_IRUGO, irq_show, NULL);
+static DEVICE_ATTR(irq, S_IRUGO | S_IWUSR | S_IWGRP, irq_show, irq_store);
 static DEVICE_ATTR(wakeup_enable, S_IWUSR | S_IWGRP, NULL,
 		   wakeup_enable_store);
 static DEVICE_ATTR(clk_enable, S_IWUSR | S_IWGRP, NULL, clk_enable_store);
@@ -234,6 +259,15 @@ static irqreturn_t fpc_tee_irq_handler(int irq, void *handle)
 				  msecs_to_jiffies(FPC_TTW_HOLD_TIME_MS));
 
 	sysfs_notify(&fpc->spi->dev.kobj, NULL, dev_attr_irq.attr.name);
+
+	/*
+	 * Keep the ONESHOT IRQ masked until the HAL reads the irq node, which
+	 * acks through irq_show().  The stock fpc_irq driver does the same
+	 * with a 100 ms cap so a dead HAL cannot wedge the sensor IRQ line.
+	 */
+	INIT_COMPLETION(fpc->irq_sent);
+	wait_for_completion_timeout(&fpc->irq_sent, msecs_to_jiffies(100));
+
 	return IRQ_HANDLED;
 }
 
@@ -276,6 +310,7 @@ static int fpc_tee_probe(struct spi_device *spi)
 		return spi->irq;
 
 	mutex_init(&fpc->lock);
+	init_completion(&fpc->irq_sent);
 	atomic_set(&fpc->wakeup_enabled, 0);
 	wake_lock_init(&fpc->ttw_wake_lock, WAKE_LOCK_SUSPEND, "fpc_ttw_wl");
 	spi_set_drvdata(spi, fpc);
