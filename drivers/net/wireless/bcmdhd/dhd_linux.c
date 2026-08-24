@@ -1631,7 +1631,8 @@ module_param(dtim_suspended, int, 0660);
 int wifi_pm_awake = PM_FAST;
 module_param(wifi_pm_awake, int, 0660);
 
-int wifi_pm_suspended = PM_MAX;
+/* Keep PM2 active during suspend instead of forcing high-latency PM_MAX. */
+int wifi_pm_suspended = PM_FAST;
 module_param(wifi_pm_suspended, int, 0660);
 
 static int dhd_set_suspend(int value, dhd_pub_t *dhd)

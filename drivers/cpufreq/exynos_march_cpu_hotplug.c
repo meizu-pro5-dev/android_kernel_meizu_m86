@@ -69,13 +69,17 @@ module_param(max_cpus_online, uint, 0664);
 static unsigned int min_cpu_up_time = DEFAULT_MIN_UP_TIME;
 module_param(min_cpu_up_time, uint, 0664);
 
-static unsigned int min_cpu_boosted = 1;
+static unsigned int min_cpu_boosted = 2;
 module_param(min_cpu_boosted, uint, 0664);
+
+static unsigned int interaction_boost_ms = 400;
+module_param(interaction_boost_ms, uint, 0664);
+static unsigned long interaction_boost_until;
 
 static unsigned int cpu_nr_run_threshold = CPU_NR_THRESHOLD;
 module_param(cpu_nr_run_threshold, uint, 0664);
 
-static unsigned int current_profile_no = 1;
+static unsigned int current_profile_no = 0;
 module_param(current_profile_no, uint, 0664);
 
 static unsigned int nr_run_thresholds_high[] = {
@@ -640,6 +644,39 @@ static __ref int change_core_num_cluster1(int cluster_on_off)
 	return ret;
 }
 
+static unsigned int interaction_boost;
+
+static int set_interaction_boost(const char *val, struct kernel_param *kp)
+{
+	unsigned int target;
+	int ret;
+
+	ret = param_set_uint(val, kp);
+	if (ret || !interaction_boost)
+		return ret;
+
+	/*
+	 * Complete cpu_up() before returning to userspace. PowerHAL can then
+	 * safely write the CPU4 interactive nodes created with its policy.
+	 */
+	mutex_lock(&march_thread_lock);
+	interaction_boost_until = jiffies +
+		msecs_to_jiffies(interaction_boost_ms);
+	if (lcd_is_on && current_profile_no != 2) {
+		target = max_t(unsigned int,
+			get_online_cpu_num_on_cluster(CL_ONE), min_cpu_boosted);
+		change_core_num_cluster1(target);
+	}
+	interaction_boost = 0;
+	mutex_unlock(&march_thread_lock);
+
+	if (march_hotplug_task)
+		wake_up_process(march_hotplug_task);
+	return 0;
+}
+module_param_call(interaction_boost, set_interaction_boost, param_get_uint,
+		&interaction_boost, 0664);
+
 static void event_hotplug_cluster0_work(struct work_struct *work)
 {
 	int target_num;
@@ -810,7 +847,6 @@ static unsigned int calculate_thread_stats(void)
 static int on_run(void *data)
 {
 	int on_cpu = 0;
-        unsigned int online_cpus;
         int target = 1;
 
         struct cpumask thread_cpumask;
@@ -822,6 +858,7 @@ static int on_run(void *data)
 	mutex_lock(&march_thread_lock);
 	while (!kthread_should_stop()) {
 		unsigned int cluster1_core_num, cluster0_core_num;
+		bool interaction_active;
 
 		if (get_hotplug_running_status()) {
 			mutex_unlock(&march_thread_lock);
@@ -829,15 +866,11 @@ static int on_run(void *data)
 		}
 
                 target = calculate_thread_stats();
-                online_cpus = num_online_cpus();
 
                 if (target < min_cpus_online)
                     target = min_cpus_online;
                 else if (target > max_cpus_online)
                     target = max_cpus_online;
-
-                if(target == online_cpus)
-                    goto Skip_Cores;
 
                 if(target <= 4) {
                     cluster0_core_num = target;
@@ -846,25 +879,33 @@ static int on_run(void *data)
                     cluster0_core_num = 4;
                     cluster1_core_num = target - 4;
                 }
-//                pr_err("kek0 onlineCpus: %u c0cores: %u c1cores: %u target: %u\n", online_cpus, cluster0_core_num, cluster1_core_num, target);
+
+		interaction_active = lcd_is_on && current_profile_no != 2 &&
+			time_before(jiffies, interaction_boost_until);
+
+		/* High mode and a live interaction require an A57 floor. Apply
+		 * this before comparing the desired and current cluster layout.
+		 */
+		if (lcd_is_on && current_profile_no == 0)
+			cluster1_core_num = max(cluster1_core_num,
+				min_cpu_boosted);
+		if (interaction_active || (lcd_is_on && cl1_booster != 0 &&
+			get_cur_cluster1_booster_value() > 0))
+			cluster1_core_num = max(cluster1_core_num,
+				min_cpu_boosted);
 
                 update_per_cpu_stat();
-		
-		if ((get_cur_cluster1_booster_value() > 0 && cl1_booster != 0 && lcd_is_on) || (current_profile_no == 0)) {
-                    if(cluster1_core_num == 0)
-			change_core_num_cluster1(min_cpu_boosted);
-                    else
+
+		if (cluster1_core_num !=
+			get_online_cpu_num_on_cluster(CL_ONE))
 			change_core_num_cluster1(cluster1_core_num);
 
-                  decrease_cluster1_booster();
-		} else if (cluster1_core_num != get_cur_cluster1_core_num()) {
-			change_core_num_cluster1(cluster1_core_num);
-		}
-
-		if (cluster0_core_num != get_cur_cluster0_core_num()) {
+		if (cluster0_core_num !=
+			get_online_cpu_num_on_cluster(CL_ZERO))
 			change_core_num_cluster0(cluster0_core_num,1);
-		}
-Skip_Cores:
+
+		if (get_cur_cluster1_booster_value() > 0)
+			decrease_cluster1_booster();
 		mutex_unlock(&march_thread_lock);
 		NonDeferedTime = cpufreq_interactive_get_down_sample_time()/USEC_PER_MSEC;
 		set_current_state(TASK_INTERRUPTIBLE);

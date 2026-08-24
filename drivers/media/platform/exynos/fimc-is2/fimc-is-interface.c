@@ -663,7 +663,10 @@ static int fimc_is_set_cmd(struct fimc_is_interface *itf,
 	ret = wait_idlestate(itf);
 	if (ret) {
 		exit_request_barrier(itf);
-		err("%d command is timeout", msg->command);
+		err("command timeout: cmd=%u instance=%u group=%u params=%u,%u,%u,%u",
+			msg->command, msg->instance, msg->group,
+			msg->param1, msg->param2, msg->param3, msg->param4);
+		fimc_is_hw_logdump(itf);
 		fimc_is_hw_regdump(itf);
 		print_req_work_list(&itf->work_list[INTR_GENERAL]);
 		print_work_data_state(itf);
@@ -736,7 +739,7 @@ static int fimc_is_set_cmd(struct fimc_is_interface *itf,
 	exit_request_barrier(itf);
 
 exit:
-	if (ret)
+	if (ret && ret != -ETIME)
 		fimc_is_hw_logdump(itf);
 
 	return ret;

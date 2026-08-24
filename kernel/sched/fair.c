@@ -7161,7 +7161,7 @@ static unsigned int hmp_up_migration(int cpu, int *target_cpu, struct sched_enti
 
 #ifdef CONFIG_SCHED_HMP_PRIO_FILTER
 	/* Filter by task priority */
-	if (p->prio >= hmp_up_prio)
+	if (p->prio > hmp_up_prio)
 		return 0;
 #endif
 	if (!hmp_boost()) {
@@ -7241,7 +7241,7 @@ static unsigned int hmp_down_migration(int cpu, struct sched_entity *se)
         }
 #ifdef CONFIG_SCHED_HMP_PRIO_FILTER
 	/* Filter by task priority */
-	if ((p->prio >= hmp_up_prio) &&
+	if ((p->prio > hmp_up_prio) &&
 		cpumask_intersects(&hmp_slower_domain(cpu)->cpus,
 					tsk_cpus_allowed(p))) {
 		return 1;

@@ -46,7 +46,7 @@
 #include "fimc-is-mem.h"
 
 #define FIMC_IS_DRV_NAME			"exynos-fimc-is"
-#define FIMC_IS_COMMAND_TIMEOUT			(3*1000*HZ)
+#define FIMC_IS_COMMAND_TIMEOUT			(5*HZ)
 #define FIMC_IS_STARTUP_TIMEOUT			(3*HZ)
 #define FIMC_IS_COMPANION_TIMEOUT		(1*HZ)
 #define FIMC_IS_SHUTDOWN_TIMEOUT		(10*HZ)
