@@ -505,7 +505,7 @@
 		csi_ch = <2>;
 		flite_ch = <2>;		
 		is_bns = <1>;		
-		status = "fail";
+		status = "okay";
 	};
 
 	fimc_is_sensor3: fimc_is_sensor@14040000 {
@@ -514,7 +514,7 @@
 		csi_ch = <3>;		
 		flite_ch = <3>; 		
 		is_bns = <0>; 		
-		status = "fail";
+		status = "okay";
 	};
 	
 	fimc_is@14200000 {
