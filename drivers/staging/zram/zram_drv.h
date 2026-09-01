@@ -51,10 +51,17 @@ static const size_t max_zpage_size = PAGE_SIZE / 4 * 3;
 #define ZRAM_SECTOR_PER_LOGICAL_BLOCK	\
 	(1 << (ZRAM_LOGICAL_BLOCK_SHIFT - SECTOR_SHIFT))
 
-/* Flags for zram pages (table[page_no].flags) */
+/*
+ * Store the object size and per-slot flags in one naturally aligned word.
+ * The access bit is also used as a non-sleeping lock by swap free notify.
+ */
+#define ZRAM_FLAG_SHIFT 24
+
+/* Flags for zram pages (table[page_no].value) */
 enum zram_pageflags {
 	/* Page consists entirely of zeros */
-	ZRAM_ZERO,
+	ZRAM_ZERO = ZRAM_FLAG_SHIFT,
+	ZRAM_ACCESS,
 
 	__NR_ZRAM_PAGEFLAGS,
 };
@@ -64,10 +71,8 @@ enum zram_pageflags {
 /* Allocated for each disk page */
 struct table {
 	unsigned long handle;
-	u16 size;	/* object size (excluding header) */
-	u8 count;	/* object ref count (not yet used) */
-	u8 flags;
-} __aligned(4);
+	unsigned long value;	/* object size, flags and per-slot access lock */
+};
 
 struct zram_stats {
 	u64 compr_size;		/* compressed size of pages stored */
