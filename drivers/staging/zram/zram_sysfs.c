@@ -30,6 +30,17 @@ static u64 zram_stat64_read(struct zram *zram, u64 *v)
 	return val;
 }
 
+static u32 zram_stat32_read(struct zram *zram, u32 *v)
+{
+	u32 val;
+
+	spin_lock(&zram->stat64_lock);
+	val = *v;
+	spin_unlock(&zram->stat64_lock);
+
+	return val;
+}
+
 static struct zram *dev_to_zram(struct device *dev)
 {
 	int i;
@@ -160,7 +171,8 @@ static ssize_t zero_pages_show(struct device *dev,
 {
 	struct zram *zram = dev_to_zram(dev);
 
-	return sprintf(buf, "%u\n", zram->stats.pages_zero);
+	return sprintf(buf, "%u\n",
+		zram_stat32_read(zram, &zram->stats.pages_zero));
 }
 
 static ssize_t orig_data_size_show(struct device *dev,
@@ -168,8 +180,8 @@ static ssize_t orig_data_size_show(struct device *dev,
 {
 	struct zram *zram = dev_to_zram(dev);
 
-	return sprintf(buf, "%llu\n",
-		(u64)(zram->stats.pages_stored) << PAGE_SHIFT);
+	return sprintf(buf, "%llu\n", (u64)zram_stat32_read(zram,
+		&zram->stats.pages_stored) << PAGE_SHIFT);
 }
 
 static ssize_t compr_data_size_show(struct device *dev,
