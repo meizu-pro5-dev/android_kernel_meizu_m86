@@ -876,6 +876,18 @@ struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *prog)
 		goto out_off;
 	}
 
+	/* module_alloc() returns executable mappings.  Remove execute permission
+	 * before emitting any valid instructions so generated code is never both
+	 * writable and executable. */
+	ret = set_memory_nx((unsigned long)header, header->pages);
+	if (ret) {
+		pr_err("failed to make JIT image non-executable: ret=%d addr=%pK pages=%u\n",
+			ret, header, header->pages);
+		bpf_jit_binary_free(header);
+		prog = orig_prog;
+		goto out_off;
+	}
+
 	/* 2. Now, the actual pass. */
 
 	ctx.image = (u32 *)image_ptr;
@@ -927,6 +939,30 @@ struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *prog)
 		prog = orig_prog;
 		goto out_off;
 	}
+	ret = set_memory_x((unsigned long)header, header->pages);
+	if (ret) {
+		int nx_ret;
+		int rw_ret;
+
+		pr_err("failed to make JIT image executable: ret=%d addr=%pK pages=%u\n",
+			ret, header, header->pages);
+		/* set_memory_x() may have changed a prefix.  Revoke execute from the
+		 * whole allocation before making it writable for the allocator. */
+		nx_ret = set_memory_nx((unsigned long)header, header->pages);
+		if (nx_ret) {
+			pr_err("failed to revoke rejected JIT image execute permission; retaining allocation: ret=%d addr=%pK pages=%u\n",
+				nx_ret, header, header->pages);
+		} else {
+			rw_ret = set_memory_rw((unsigned long)header, header->pages);
+			if (rw_ret)
+				pr_err("failed to restore rejected JIT image writable; retaining allocation: ret=%d addr=%pK pages=%u\n",
+					rw_ret, header, header->pages);
+			else
+				bpf_jit_binary_free(header);
+		}
+		prog = orig_prog;
+		goto out_off;
+	}
 	prog->bpf_func = (void *)ctx.image;
 	prog->jited = 1;
 
@@ -947,6 +983,13 @@ void bpf_jit_free(struct bpf_prog *prog)
 
 	if (!prog->jited)
 		goto free_filter;
+
+	ret = set_memory_nx(addr, header->pages);
+	if (ret) {
+		pr_err("failed to make JIT image non-executable; retaining allocation: ret=%d addr=%pK pages=%u\n",
+			ret, header, header->pages);
+		goto free_filter;
+	}
 
 	ret = set_memory_rw(addr, header->pages);
 	if (ret) {
