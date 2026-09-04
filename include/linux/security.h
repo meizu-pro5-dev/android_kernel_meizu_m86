@@ -52,6 +52,10 @@ struct msg_queue;
 struct xattr;
 struct xfrm_sec_ctx;
 struct mm_struct;
+struct bpf_map;
+struct bpf_prog;
+struct bpf_prog_aux;
+union bpf_attr;
 
 #ifdef CONFIG_RKP_KDP
 /* For understand size of struct cred*/
@@ -1725,6 +1729,16 @@ struct security_operations {
 				 struct audit_context *actx);
 	void (*audit_rule_free) (void *lsmrule);
 #endif /* CONFIG_AUDIT */
+
+#ifdef CONFIG_BPF_SYSCALL
+	int (*bpf)(int cmd, union bpf_attr *attr, unsigned int size);
+	int (*bpf_map)(struct bpf_map *map, fmode_t fmode);
+	int (*bpf_prog)(struct bpf_prog *prog);
+	int (*bpf_map_alloc_security)(struct bpf_map *map);
+	void (*bpf_map_free_security)(struct bpf_map *map);
+	int (*bpf_prog_alloc_security)(struct bpf_prog_aux *aux);
+	void (*bpf_prog_free_security)(struct bpf_prog_aux *aux);
+#endif /* CONFIG_BPF_SYSCALL */
 };
 
 /* prototypes */
@@ -1735,6 +1749,16 @@ extern void __init security_fixup_ops(struct security_operations *ops);
 
 
 /* Security operations */
+#ifdef CONFIG_BPF_SYSCALL
+int security_bpf(int cmd, union bpf_attr *attr, unsigned int size);
+int security_bpf_map(struct bpf_map *map, fmode_t fmode);
+int security_bpf_prog(struct bpf_prog *prog);
+int security_bpf_map_alloc(struct bpf_map *map);
+void security_bpf_map_free(struct bpf_map *map);
+int security_bpf_prog_alloc(struct bpf_prog_aux *aux);
+void security_bpf_prog_free(struct bpf_prog_aux *aux);
+#endif /* CONFIG_BPF_SYSCALL */
+
 int security_binder_set_context_mgr(struct task_struct *mgr);
 int security_binder_transaction(struct task_struct *from, struct task_struct *to);
 int security_binder_transfer_binder(struct task_struct *from, struct task_struct *to);
@@ -1907,6 +1931,42 @@ static inline void security_init_mnt_opts(struct security_mnt_opts *opts)
 static inline void security_free_mnt_opts(struct security_mnt_opts *opts)
 {
 }
+
+#ifdef CONFIG_BPF_SYSCALL
+static inline int security_bpf(int cmd, union bpf_attr *attr,
+			       unsigned int size)
+{
+	return 0;
+}
+
+static inline int security_bpf_map(struct bpf_map *map, fmode_t fmode)
+{
+	return 0;
+}
+
+static inline int security_bpf_prog(struct bpf_prog *prog)
+{
+	return 0;
+}
+
+static inline int security_bpf_map_alloc(struct bpf_map *map)
+{
+	return 0;
+}
+
+static inline void security_bpf_map_free(struct bpf_map *map)
+{
+}
+
+static inline int security_bpf_prog_alloc(struct bpf_prog_aux *aux)
+{
+	return 0;
+}
+
+static inline void security_bpf_prog_free(struct bpf_prog_aux *aux)
+{
+}
+#endif /* CONFIG_BPF_SYSCALL */
 
 /*
  * This is the default capabilities functionality.  Most of these functions
@@ -3183,4 +3243,3 @@ static inline int yama_task_prctl(int option, unsigned long arg2,
 #endif /* CONFIG_SECURITY_YAMA */
 
 #endif /* ! __LINUX_SECURITY_H */
-

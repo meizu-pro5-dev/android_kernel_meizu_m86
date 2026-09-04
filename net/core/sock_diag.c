@@ -13,12 +13,33 @@ static const struct sock_diag_handler *sock_diag_handlers[AF_MAX];
 static int (*inet_rcv_compat)(struct sk_buff *skb, struct nlmsghdr *nlh);
 static DEFINE_MUTEX(sock_diag_table_mutex);
 
+u64 sock_gen_cookie(struct sock *sk)
+{
+	u64 res;
+
+	/* Do not expose an address. A namespace-local monotonic generator and
+	 * an atomic compare/exchange make the value stable for the object while
+	 * retaining safe lazy allocation on all socket paths. */
+	for (;;) {
+		res = atomic64_read(&sk->sk_cookie);
+		if (res)
+			return res;
+
+		res = atomic64_inc_return(&sock_net(sk)->cookie_gen);
+		if (unlikely(!res))
+			continue;
+		if (atomic64_cmpxchg(&sk->sk_cookie, 0, res) == 0)
+			return res;
+	}
+}
+EXPORT_SYMBOL_GPL(sock_gen_cookie);
+
 int sock_diag_check_cookie(void *sk, __u32 *cookie)
 {
 	if ((cookie[0] != INET_DIAG_NOCOOKIE ||
 	     cookie[1] != INET_DIAG_NOCOOKIE) &&
-	    ((u32)(unsigned long)sk != cookie[0] ||
-	     (u32)((((unsigned long)sk) >> 31) >> 1) != cookie[1]))
+	    ((u32)sock_gen_cookie((struct sock *)sk) != cookie[0] ||
+	     (u32)(sock_gen_cookie((struct sock *)sk) >> 32) != cookie[1]))
 		return -ESTALE;
 	else
 		return 0;
@@ -27,8 +48,10 @@ EXPORT_SYMBOL_GPL(sock_diag_check_cookie);
 
 void sock_diag_save_cookie(void *sk, __u32 *cookie)
 {
-	cookie[0] = (u32)(unsigned long)sk;
-	cookie[1] = (u32)(((unsigned long)sk >> 31) >> 1);
+	u64 res = sock_gen_cookie((struct sock *)sk);
+
+	cookie[0] = (u32)res;
+	cookie[1] = (u32)(res >> 32);
 }
 EXPORT_SYMBOL_GPL(sock_diag_save_cookie);
 
@@ -54,6 +77,7 @@ int sock_diag_put_filterinfo(bool may_report_filterinfo, struct sock *sk,
 {
 	struct nlattr *attr;
 	struct sk_filter *filter;
+	struct sock_fprog_kern *fprog;
 	unsigned int len;
 	int err = 0;
 
@@ -65,7 +89,17 @@ int sock_diag_put_filterinfo(bool may_report_filterinfo, struct sock *sk,
 	rcu_read_lock();
 
 	filter = rcu_dereference(sk->sk_filter);
-	len = filter ? filter->len * sizeof(struct sock_filter) : 0;
+	/* A socket-attached eBPF filter has no inline classic instruction
+	 * array.  Classic SO_ATTACH_FILTER programs retain their original
+	 * representation in prog->orig_prog; a native SO_ATTACH_BPF program
+	 * has no dumpable classic representation. */
+	fprog = filter && filter->prog ? filter->prog->orig_prog : NULL;
+	if (fprog)
+		len = fprog->len * sizeof(struct sock_filter);
+	else if (filter && !filter->prog)
+		len = filter->len * sizeof(struct sock_filter);
+	else
+		len = 0;
 
 	attr = nla_reserve(skb, attrtype, len);
 	if (attr == NULL) {
@@ -73,7 +107,9 @@ int sock_diag_put_filterinfo(bool may_report_filterinfo, struct sock *sk,
 		goto out;
 	}
 
-	if (filter) {
+	if (fprog) {
+		memcpy(nla_data(attr), fprog->filter, len);
+	} else if (filter && !filter->prog) {
 		struct sock_filter *fb = (struct sock_filter *)nla_data(attr);
 		int i;
 

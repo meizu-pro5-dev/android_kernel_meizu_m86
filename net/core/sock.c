@@ -116,6 +116,7 @@
 #include <linux/static_key.h>
 #include <linux/memcontrol.h>
 #include <linux/prefetch.h>
+#include <linux/sock_diag.h>
 
 #include <asm/uaccess.h>
 
@@ -898,6 +899,15 @@ set_rcvbuf:
 		}
 		break;
 
+	case SO_ATTACH_BPF:
+		/* The option is exactly one native/compat int containing a BPF
+		 * program fd. Never reinterpret a larger or shorter blob. */
+		if (optlen != sizeof(int))
+			ret = -EINVAL;
+		else
+			ret = sk_attach_bpf(val, sk);
+		break;
+
 	case SO_DETACH_FILTER:
 		ret = sk_detach_filter(sk);
 		break;
@@ -978,6 +988,7 @@ int sock_getsockopt(struct socket *sock, int level, int optname,
 
 	union {
 		int val;
+		u64 val64;
 		struct linger ling;
 		struct timeval tm;
 	} v;
@@ -1204,6 +1215,13 @@ int sock_getsockopt(struct socket *sock, int level, int optname,
 		v.val = sock_flag(sk, SOCK_SELECT_ERR_QUEUE);
 		break;
 
+	case SO_COOKIE:
+		lv = sizeof(u64);
+		if (len < lv)
+			return -EINVAL;
+		v.val64 = sock_gen_cookie(sk);
+		break;
+
 	default:
 		return -ENOPROTOOPT;
 	}
@@ -1322,6 +1340,7 @@ static void sk_prot_free(struct proto *prot, struct sock *sk)
 	owner = prot->owner;
 	slab = prot->slab;
 
+	cgroup_sk_free(sk->skcg);
 	security_sk_free(sk);
 	if (slab != NULL)
 		kmem_cache_free(slab, sk);
@@ -1376,6 +1395,7 @@ struct sock *sk_alloc(struct net *net, int family, gfp_t priority,
 		sock_lock_init(sk);
 		sock_net_set(sk, get_net(net));
 		atomic_set(&sk->sk_wmem_alloc, 1);
+		cgroup_sk_alloc(&sk->skcg);
 
 		sock_update_classid(sk);
 		sock_update_netprioidx(sk);
@@ -1466,6 +1486,7 @@ struct sock *sk_clone_lock(const struct sock *sk, const gfp_t priority)
 		struct sk_filter *filter;
 
 		sock_copy(newsk, sk);
+		cgroup_sk_clone(newsk->skcg);
 
 		/* SANITY */
 		get_net(sock_net(newsk));
@@ -1517,6 +1538,9 @@ struct sock *sk_clone_lock(const struct sock *sk, const gfp_t priority)
 		}
 
 		newsk->sk_err	   = 0;
+		/* Clones are distinct socket objects and receive a fresh cookie on
+		 * first use; the time-wait path copies the parent's value below. */
+		atomic64_set(&newsk->sk_cookie, 0);
 		newsk->sk_priority = 0;
 		/*
 		 * Before updating sk_refcnt, we must commit prior changes to memory
@@ -2321,6 +2345,7 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 	sk->sk_stamp = ktime_set(-1L, 0);
 
 	sk->sk_pacing_rate = ~0U;
+	atomic64_set(&sk->sk_cookie, 0);
 	/*
 	 * Before updating sk_refcnt, we must commit prior changes to memory
 	 * (Documentation/RCU/rculist_nulls.txt for details)
