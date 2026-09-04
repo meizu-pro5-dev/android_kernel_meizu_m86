@@ -226,17 +226,23 @@ void perf_trace_del(struct perf_event *p_event, int flags)
 	tp_event->class->reg(tp_event, TRACE_REG_PERF_DEL, p_event);
 }
 
+__kprobes void perf_trace_buf_update(void *record, u16 type)
+{
+	struct trace_entry *entry = record;
+	unsigned long flags;
+
+	local_save_flags(flags);
+	tracing_generic_entry_update(entry, flags, preempt_count());
+	entry->type = type;
+}
+EXPORT_SYMBOL_GPL(perf_trace_buf_update);
+
 __kprobes void *perf_trace_buf_prepare(int size, unsigned short type,
 				       struct pt_regs *regs, int *rctxp)
 {
-	struct trace_entry *entry;
-	unsigned long flags;
 	char *raw_data;
-	int pc;
 
 	BUILD_BUG_ON(PERF_MAX_TRACE_SIZE % sizeof(unsigned long));
-
-	pc = preempt_count();
 
 	*rctxp = perf_swevent_get_recursion_context();
 	if (*rctxp < 0)
@@ -247,10 +253,7 @@ __kprobes void *perf_trace_buf_prepare(int size, unsigned short type,
 	/* zero the dead bytes from align to not leak stack to user */
 	memset(&raw_data[size - sizeof(u64)], 0, sizeof(u64));
 
-	entry = (struct trace_entry *)raw_data;
-	local_save_flags(flags);
-	tracing_generic_entry_update(entry, flags, pc);
-	entry->type = type;
+	perf_trace_buf_update(raw_data, type);
 
 	return raw_data;
 }

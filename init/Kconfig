@@ -1451,6 +1451,14 @@ config BPF_SYSCALL
 	  Enable the bpf() system call that allows to manipulate eBPF
 	  programs and maps via file descriptors.
 
+config BPF_PERF_EVENT
+	bool
+	depends on BPF_SYSCALL && PERF_EVENTS
+	default y
+	help
+	  Enable BPF perf-event maps and stack maps.  This is available only
+	  when the kernel perf-event ABI is enabled.
+
 config SHMEM
 	bool "Use full shmem filesystem" if EXPERT
 	default y
