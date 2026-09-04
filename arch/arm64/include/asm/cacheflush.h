@@ -77,6 +77,12 @@ extern void flush_icache_range(unsigned long start, unsigned long end);
 extern void __flush_dcache_area(void *addr, size_t len);
 extern void __flush_cache_user_range(unsigned long start, unsigned long end);
 
+/* Page permission changes used by executable module/BPF allocations. */
+int set_memory_ro(unsigned long addr, int numpages);
+int set_memory_rw(unsigned long addr, int numpages);
+int set_memory_x(unsigned long addr, int numpages);
+int set_memory_nx(unsigned long addr, int numpages);
+
 static inline void flush_cache_mm(struct mm_struct *mm)
 {
 }
