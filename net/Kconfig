@@ -357,3 +357,9 @@ endif   # if NET
 # Used by archs to tell that they support BPF_JIT
 config HAVE_BPF_JIT
 	bool
+
+# Used by arches that provide a native eBPF backend.  Keep this separate from
+# HAVE_BPF_JIT so the legacy classic socket-filter ABI can remain interpreter
+# backed on architectures without a classic compiler.
+config HAVE_EBPF_JIT
+	bool
