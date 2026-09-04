@@ -84,6 +84,7 @@
 #include <linux/export.h>
 #include <linux/msg.h>
 #include <linux/shm.h>
+#include <linux/bpf.h>
 
 #include "avc.h"
 #include "objsec.h"
@@ -1734,6 +1735,10 @@ static inline int path_has_perm(const struct cred *cred,
 	return inode_has_perm(cred, inode, av, &ad, 0);
 }
 
+#ifdef CONFIG_BPF_SYSCALL
+static int bpf_fd_pass(struct file *file, u32 sid);
+#endif
+
 /* Check whether a task can use an open file descriptor to
    access an inode in a given way.  Check access to the
    descriptor itself, and then use dentry_has_perm to
@@ -1763,6 +1768,12 @@ static int file_has_perm(const struct cred *cred,
 		if (rc)
 			goto out;
 	}
+
+#ifdef CONFIG_BPF_SYSCALL
+	rc = bpf_fd_pass(file, sid);
+	if (rc)
+		return rc;
+#endif
 
 	/* av is zero if only checking access to the descriptor. */
 	rc = 0;
@@ -2080,6 +2091,12 @@ static int selinux_binder_transfer_file(struct task_struct *from, struct task_st
 		if (rc)
 			return rc;
 	}
+
+#ifdef CONFIG_BPF_SYSCALL
+	rc = bpf_fd_pass(file, sid);
+	if (rc)
+		return rc;
+#endif
 
 	if (unlikely(IS_PRIVATE(inode)))
 		return 0;
@@ -6541,8 +6558,180 @@ static int selinux_key_getsecurity(struct key *key, char **_buffer)
 
 #endif
 
+#ifdef CONFIG_BPF_SYSCALL
+static int selinux_bpf(int cmd, union bpf_attr *attr, unsigned int size)
+{
+	u32 sid = current_sid();
+
+	(void)attr;
+	(void)size;
+
+	switch (cmd) {
+	case BPF_MAP_CREATE:
+		return avc_has_perm(sid, sid, SECCLASS_BPF,
+				    BPF__MAP_CREATE, NULL);
+	case BPF_PROG_LOAD:
+		return avc_has_perm(sid, sid, SECCLASS_BPF,
+				    BPF__PROG_LOAD, NULL);
+	case BPF_MAP_LOOKUP_ELEM:
+	case BPF_MAP_UPDATE_ELEM:
+	case BPF_MAP_DELETE_ELEM:
+	case BPF_MAP_GET_NEXT_KEY:
+	case BPF_OBJ_PIN:
+	case BPF_OBJ_GET:
+#ifdef CONFIG_CGROUP_BPF
+	case BPF_PROG_ATTACH:
+	case BPF_PROG_DETACH:
+#endif
+		return 0;
+	default:
+		/* Keep the command ABI fail-closed if the syscall grows. */
+		return -EINVAL;
+	}
+}
+
+static u32 bpf_map_fmode_to_av(fmode_t fmode)
+{
+	u32 av = 0;
+
+	if (fmode & FMODE_READ)
+		av |= BPF__MAP_READ;
+	if (fmode & FMODE_WRITE)
+		av |= BPF__MAP_WRITE;
+	return av;
+}
+
+/* Anonymous BPF inodes share an inode, so mediate the object itself. */
+static int bpf_fd_pass(struct file *file, u32 sid)
+{
+	struct bpf_security_struct *bpfsec;
+	struct bpf_prog *prog;
+	struct bpf_map *map;
+	u32 av;
+
+	if (!file)
+		return -EINVAL;
+
+	if (file->f_op == &bpf_map_fops) {
+		map = file->private_data;
+		if (!map)
+			return -EACCES;
+		bpfsec = map->security;
+		if (!bpfsec)
+			return -EACCES;
+		av = bpf_map_fmode_to_av(file->f_mode);
+		if (!av)
+			return -EACCES;
+		return avc_has_perm(sid, bpfsec->sid, SECCLASS_BPF, av, NULL);
+	}
+
+	if (file->f_op == &bpf_prog_fops) {
+		prog = file->private_data;
+		if (!prog || !prog->aux)
+			return -EACCES;
+		bpfsec = prog->aux->security;
+		if (!bpfsec)
+			return -EACCES;
+		return avc_has_perm(sid, bpfsec->sid, SECCLASS_BPF,
+					BPF__PROG_RUN, NULL);
+	}
+
+	return 0;
+}
+
+static int selinux_bpf_map(struct bpf_map *map, fmode_t fmode)
+{
+	struct bpf_security_struct *bpfsec;
+	u32 av;
+
+	if (!map)
+		return -EINVAL;
+	bpfsec = map->security;
+	if (!bpfsec)
+		return -EACCES;
+	av = bpf_map_fmode_to_av(fmode);
+	if (!av)
+		return -EACCES;
+	return avc_has_perm(current_sid(), bpfsec->sid, SECCLASS_BPF,
+				av, NULL);
+}
+
+static int selinux_bpf_prog(struct bpf_prog *prog)
+{
+	struct bpf_security_struct *bpfsec;
+
+	if (!prog || !prog->aux)
+		return -EINVAL;
+	bpfsec = prog->aux->security;
+	if (!bpfsec)
+		return -EACCES;
+	return avc_has_perm(current_sid(), bpfsec->sid, SECCLASS_BPF,
+				BPF__PROG_RUN, NULL);
+}
+
+static int selinux_bpf_map_alloc(struct bpf_map *map)
+{
+	struct bpf_security_struct *bpfsec;
+
+	if (!map || map->security)
+		return -EINVAL;
+	bpfsec = kzalloc(sizeof(*bpfsec), GFP_KERNEL);
+	if (!bpfsec)
+		return -ENOMEM;
+	bpfsec->sid = current_sid();
+	map->security = bpfsec;
+	return 0;
+}
+
+static void selinux_bpf_map_free(struct bpf_map *map)
+{
+	struct bpf_security_struct *bpfsec;
+
+	if (!map)
+		return;
+	bpfsec = map->security;
+	map->security = NULL;
+	kfree(bpfsec);
+}
+
+static int selinux_bpf_prog_alloc(struct bpf_prog_aux *aux)
+{
+	struct bpf_security_struct *bpfsec;
+
+	if (!aux || aux->security)
+		return -EINVAL;
+	bpfsec = kzalloc(sizeof(*bpfsec), GFP_KERNEL);
+	if (!bpfsec)
+		return -ENOMEM;
+	bpfsec->sid = current_sid();
+	aux->security = bpfsec;
+	return 0;
+}
+
+static void selinux_bpf_prog_free(struct bpf_prog_aux *aux)
+{
+	struct bpf_security_struct *bpfsec;
+
+	if (!aux)
+		return;
+	bpfsec = aux->security;
+	aux->security = NULL;
+	kfree(bpfsec);
+}
+#endif
+
 RKP_RO_AREA static struct security_operations selinux_ops = {
 	.name =				"selinux",
+
+#ifdef CONFIG_BPF_SYSCALL
+	.bpf =                          selinux_bpf,
+	.bpf_map =                      selinux_bpf_map,
+	.bpf_prog =                     selinux_bpf_prog,
+	.bpf_map_alloc_security =       selinux_bpf_map_alloc,
+	.bpf_map_free_security =        selinux_bpf_map_free,
+	.bpf_prog_alloc_security =      selinux_bpf_prog_alloc,
+	.bpf_prog_free_security =       selinux_bpf_prog_free,
+#endif
 
 	.binder_set_context_mgr =	selinux_binder_set_context_mgr,
 	.binder_transaction =		selinux_binder_transaction,
