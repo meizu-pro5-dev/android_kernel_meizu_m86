@@ -58,6 +58,7 @@ struct utimbuf;
 struct mq_attr;
 struct compat_stat;
 struct compat_timeval;
+union bpf_attr;
 struct robust_list_head;
 struct getcpu_cache;
 struct old_linux_dirent;
@@ -852,4 +853,6 @@ asmlinkage long sys_getrandom(char __user *buf, size_t count,
 			    unsigned int flags);
 asmlinkage long sys_memfd_create(const char __user *uname,
 				 unsigned int flags);
+asmlinkage long sys_bpf(int cmd, union bpf_attr __user *attr,
+				unsigned int size);
 #endif

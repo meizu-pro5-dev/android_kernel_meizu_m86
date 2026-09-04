@@ -1036,6 +1036,15 @@ config DEBUG_BLK_CGROUP
 	Enable some debugging help. Currently it exports additional stat
 	files in a cgroup which can be useful for debugging.
 
+config CGROUP_BPF
+	bool "Support for eBPF programs attached to cgroups"
+	depends on CGROUPS && BPF_SYSCALL
+	default n
+	help
+	  Enable the controller-less cgroup2 compatibility hierarchy and the
+	  inet ingress/egress eBPF attach points used by Android netd.
+	  Legacy cgroup v1 controllers remain unchanged.
+
 endif # CGROUPS
 
 config CHECKPOINT_RESTORE
@@ -1268,6 +1277,10 @@ config PANIC_TIMEOUT
 	help
 	  Set default panic timeout.
 
+# interpreter that classic socket filters depend on
+config BPF
+	bool
+
 menuconfig EXPERT
 	bool "Configure standard kernel features (expert users)"
 	# Unhide debug options, to make the on-by-default options visible
@@ -1427,6 +1440,16 @@ config EVENTFD
 	  kernel notification (ie. KAIO) or userspace notifications.
 
 	  If unsure, say Y.
+
+# syscall, maps, verifier
+config BPF_SYSCALL
+	bool "Enable bpf() system call"
+	select BPF
+	select ANON_INODES
+	default n
+	help
+	  Enable the bpf() system call that allows to manipulate eBPF
+	  programs and maps via file descriptors.
 
 config SHMEM
 	bool "Use full shmem filesystem" if EXPERT

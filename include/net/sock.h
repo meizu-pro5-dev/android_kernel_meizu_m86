@@ -59,6 +59,7 @@
 #include <linux/static_key.h>
 #include <linux/aio.h>
 #include <linux/sched.h>
+#include <linux/cgroup.h>
 
 #include <linux/filter.h>
 #include <linux/rculist_nulls.h>
@@ -67,6 +68,7 @@
 #include <linux/atomic.h>
 #include <net/dst.h>
 #include <net/checksum.h>
+#include <net/tcp_states.h>
 
 struct cgroup;
 struct cgroup_subsys;
@@ -191,6 +193,8 @@ struct sock_common {
 #ifdef CONFIG_NET_NS
 	struct net	 	*skc_net;
 #endif
+	/* Stable per-socket cookie; zero means not allocated yet. */
+	atomic64_t		skc_cookie;
 	/*
 	 * fields between dontcopy_begin/dontcopy_end
 	 * are not copied in sock_copy()
@@ -305,6 +309,7 @@ struct sock {
 #define sk_bind_node		__sk_common.skc_bind_node
 #define sk_prot			__sk_common.skc_prot
 #define sk_net			__sk_common.skc_net
+#define sk_cookie		__sk_common.skc_cookie
 	socket_lock_t		sk_lock;
 	struct sk_buff_head	sk_receive_queue;
 	/*
@@ -393,6 +398,8 @@ struct sock {
 #endif
 	__u32			sk_mark;
 	u32			sk_classid;
+	/* Independent from sk_cgrp, which is reserved for memcg accounting. */
+	struct cgroup		*skcg;
 	struct cg_proto		*sk_cgrp;
 	void			(*sk_state_change)(struct sock *sk);
 	void			(*sk_data_ready)(struct sock *sk, int bytes);
@@ -1609,19 +1616,8 @@ static inline void sk_filter_release(struct sk_filter *fp)
 		call_rcu(&fp->rcu, sk_filter_release_rcu);
 }
 
-static inline void sk_filter_uncharge(struct sock *sk, struct sk_filter *fp)
-{
-	unsigned int size = sk_filter_len(fp);
-
-	atomic_sub(size, &sk->sk_omem_alloc);
-	sk_filter_release(fp);
-}
-
-static inline void sk_filter_charge(struct sock *sk, struct sk_filter *fp)
-{
-	atomic_inc(&fp->refcnt);
-	atomic_add(sk_filter_len(fp), &sk->sk_omem_alloc);
-}
+bool sk_filter_charge(struct sock *sk, struct sk_filter *fp);
+void sk_filter_uncharge(struct sock *sk, struct sk_filter *fp);
 
 /*
  * Socket reference counting postulates.
@@ -1712,6 +1708,25 @@ static inline void sock_graft(struct sock *sk, struct socket *parent)
 
 extern kuid_t sock_i_uid(struct sock *sk);
 extern unsigned long sock_i_ino(struct sock *sk);
+
+/* Helpers used by the skb BPF context.  Keep the 3.10 socket layout and
+ * independently tracked cgroup pointer; do not infer fullsock from a cast. */
+static inline bool sk_fullsock(const struct sock *sk)
+{
+	return sk && !((1 << sk->sk_state) & TCPF_TIME_WAIT);
+}
+
+static inline int sk_under_cgroup_hierarchy(struct sock *sk,
+						 struct cgroup *ancestor)
+{
+	return sk && sk->skcg && ancestor &&
+		cgroup_is_descendant(sk->skcg, ancestor);
+}
+
+static inline kuid_t sock_net_uid(const struct net *net, const struct sock *sk)
+{
+	return sk ? sock_i_uid((struct sock *)sk) : make_kuid(net->user_ns, 0);
+}
 
 static inline struct dst_entry *
 __sk_dst_get(struct sock *sk)

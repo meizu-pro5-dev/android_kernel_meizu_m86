@@ -76,4 +76,10 @@
 
 #define SO_SELECT_ERR_QUEUE	45
 
+/* Attach a verified eBPF socket filter by program fd. */
+#define SO_ATTACH_BPF		50
+
+/* Stable 64-bit per-socket cookie. */
+#define SO_COOKIE		57
+
 #endif /* __ASM_GENERIC_SOCKET_H */

@@ -159,6 +159,19 @@ extern void __init setup_per_cpu_areas(void);
 extern void __init percpu_init_late(void);
 
 extern void __percpu *__alloc_percpu(size_t size, size_t align);
+
+/*
+ * Newer users can select the allocation context explicitly.  The 3.10
+ * allocator has a single sleepable path, so keep the API boundary here and
+ * deliberately use that path; callers still receive NULL on allocation
+ * failure and retain their existing error handling.
+ */
+static inline void __percpu *__alloc_percpu_gfp(size_t size, size_t align,
+						gfp_t gfp)
+{
+	(void)gfp;
+	return __alloc_percpu(size, align);
+}
 extern void free_percpu(void __percpu *__pdata);
 extern phys_addr_t per_cpu_ptr_to_phys(void *addr);
 

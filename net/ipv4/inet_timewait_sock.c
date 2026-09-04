@@ -12,6 +12,7 @@
 #include <linux/kmemcheck.h>
 #include <linux/slab.h>
 #include <linux/module.h>
+#include <linux/sock_diag.h>
 #include <net/inet_hashtables.h>
 #include <net/inet_timewait_sock.h>
 #include <net/ip.h>
@@ -196,6 +197,9 @@ struct inet_timewait_sock *inet_twsk_alloc(const struct sock *sk, const int stat
 		tw->tw_ipv6only	    = 0;
 		tw->tw_transparent  = inet->transparent;
 		tw->tw_prot	    = sk->sk_prot_creator;
+		/* Preserve the parent socket's stable diagnostic identity, including
+		 * the lazy-allocation case where sk_cookie is still zero. */
+		atomic64_set(&tw->tw_cookie, sock_gen_cookie((struct sock *)sk));
 		twsk_net_set(tw, hold_net(sock_net(sk)));
 		/*
 		 * Because we use RCU lookups, we should not set tw_refcnt

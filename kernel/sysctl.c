@@ -62,6 +62,8 @@
 #include <linux/capability.h>
 #include <linux/binfmts.h>
 #include <linux/sched/sysctl.h>
+#include <linux/mount.h>
+#include <linux/bpf.h>
 
 #include <asm/uaccess.h>
 #include <asm/processor.h>
@@ -117,6 +119,9 @@ extern int sysctl_nr_trim_pages;
 #endif
 #ifdef CONFIG_BLOCK
 extern int blk_iopoll_enabled;
+#endif
+#ifdef CONFIG_BPF_SYSCALL
+extern int sysctl_unprivileged_bpf_disabled;
 #endif
 
 /* Constants used for minimum and  maximum */
@@ -1079,6 +1084,18 @@ static struct ctl_table kern_table[] = {
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
+	},
+#endif
+#ifdef CONFIG_BPF_SYSCALL
+	{
+		.procname	= "unprivileged_bpf_disabled",
+		.data		= &sysctl_unprivileged_bpf_disabled,
+		.maxlen		= sizeof(sysctl_unprivileged_bpf_disabled),
+		.mode		= 0444,
+		/* This backport is fail-closed: unprivileged creation stays off. */
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &one,
+		.extra2		= &one,
 	},
 #endif
 	{ }

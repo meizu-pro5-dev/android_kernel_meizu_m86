@@ -379,6 +379,8 @@ static int compat_sock_setsockopt(struct socket *sock, int level, int optname,
 	if (optname == SO_ATTACH_FILTER)
 		return do_set_attach_filter(sock, level, optname,
 					    optval, optlen);
+	if (optname == SO_ATTACH_BPF && optlen != sizeof(int))
+		return -EINVAL;
 	if (optname == SO_RCVTIMEO || optname == SO_SNDTIMEO)
 		return do_set_sock_timeout(sock, level, optname, optval, optlen);
 
