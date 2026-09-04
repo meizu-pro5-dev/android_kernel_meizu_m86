@@ -20,6 +20,7 @@
 #include <linux/workqueue.h>
 #include <linux/xattr.h>
 #include <linux/fs.h>
+#include <linux/bpf-cgroup.h>
 
 #ifdef CONFIG_CGROUPS
 
@@ -239,6 +240,11 @@ struct cgroup {
 
 	/* directory xattrs */
 	struct simple_xattrs xattrs;
+
+#ifdef CONFIG_CGROUP_BPF
+	/* Programs attached to the controller-less cgroup2 hierarchy. */
+	struct cgroup_bpf bpf;
+#endif
 };
 
 #define MAX_CGROUP_ROOT_NAMELEN 64
@@ -868,6 +874,24 @@ bool css_is_ancestor(struct cgroup_subsys_state *cg,
 unsigned short css_id(struct cgroup_subsys_state *css);
 unsigned short css_depth(struct cgroup_subsys_state *css);
 struct cgroup_subsys_state *cgroup_css_from_dir(struct file *f, int id);
+
+#ifdef CONFIG_CGROUP_BPF
+struct cgroup *cgroup_get_from_fd(int fd);
+void cgroup_sk_alloc(struct cgroup **skcg);
+void cgroup_sk_clone(struct cgroup *skcg);
+void cgroup_sk_free(struct cgroup *skcg);
+#else
+static inline void cgroup_sk_alloc(struct cgroup **skcg)
+{
+	*skcg = NULL;
+}
+static inline void cgroup_sk_clone(struct cgroup *skcg)
+{
+}
+static inline void cgroup_sk_free(struct cgroup *skcg)
+{
+}
+#endif
 
 /*
  * Default Android check for whether the current process is allowed to move a
