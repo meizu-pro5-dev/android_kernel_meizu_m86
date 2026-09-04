@@ -8,8 +8,10 @@
  */
 
 #include <linux/module.h>
+#include <linux/syscalls.h>
 #include <linux/skbuff.h>
 #include <linux/filter.h>
+#include <linux/bpf.h>
 
 #include <linux/netfilter/xt_bpf.h>
 #include <linux/netfilter/x_tables.h>
@@ -19,6 +21,25 @@ MODULE_DESCRIPTION("Xtables: BPF filter match");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("ipt_bpf");
 MODULE_ALIAS("ip6t_bpf");
+
+static int __bpf_mt_check_bytecode(struct sock_filter *insns, __u16 len,
+				   struct bpf_prog **ret)
+{
+	struct sock_fprog_kern program;
+
+	if (!len || len > XT_BPF_MAX_NUM_INSTR)
+		return -EINVAL;
+
+	program.len = len;
+	program.filter = insns;
+
+	if (bpf_prog_create(ret, &program)) {
+		pr_info("bpf: check failed: parse error\n");
+		return -EINVAL;
+	}
+
+	return 0;
+}
 
 static int bpf_mt_check(const struct xt_mtchk_param *par)
 {
@@ -35,6 +56,49 @@ static int bpf_mt_check(const struct xt_mtchk_param *par)
 	return 0;
 }
 
+static int __bpf_mt_check_fd(int fd, struct bpf_prog **ret)
+{
+	struct bpf_prog *prog;
+
+	/* bpf_prog_get_type() rejects non-BPF fds and every non-socket-filter
+	 * program. The match never accepts a weaker type check. */
+	prog = bpf_prog_get_type(fd, BPF_PROG_TYPE_SOCKET_FILTER);
+	if (IS_ERR(prog))
+		return PTR_ERR(prog);
+
+	*ret = prog;
+	return 0;
+}
+
+static int __bpf_mt_check_path(const char *path, struct bpf_prog **ret)
+{
+	if (strnlen(path, XT_BPF_PATH_MAX) == XT_BPF_PATH_MAX)
+		return -EINVAL;
+
+	*ret = bpf_prog_get_type_path(path, BPF_PROG_TYPE_SOCKET_FILTER);
+	if (IS_ERR(*ret))
+		return PTR_ERR(*ret);
+	return 0;
+}
+
+static int bpf_mt_check_v1(const struct xt_mtchk_param *par)
+{
+	struct xt_bpf_info_v1 *info = par->matchinfo;
+
+	switch (info->mode) {
+	case XT_BPF_MODE_BYTECODE:
+		return __bpf_mt_check_bytecode(info->bpf_program,
+					       info->bpf_program_num_elem,
+					       &info->filter);
+	case XT_BPF_MODE_FD_ELF:
+		return __bpf_mt_check_fd(info->fd, &info->filter);
+	case XT_BPF_MODE_FD_PINNED:
+		return __bpf_mt_check_path(info->path, &info->filter);
+	default:
+		return -EINVAL;
+	}
+}
+
 static bool bpf_mt(const struct sk_buff *skb, struct xt_action_param *par)
 {
 	const struct xt_bpf_info *info = par->matchinfo;
@@ -48,7 +112,26 @@ static void bpf_mt_destroy(const struct xt_mtdtor_param *par)
 	sk_unattached_filter_destroy(info->filter);
 }
 
-static struct xt_match bpf_mt_reg __read_mostly = {
+static bool bpf_mt_v1(const struct sk_buff *skb, struct xt_action_param *par)
+{
+	const struct xt_bpf_info_v1 *info = par->matchinfo;
+
+	return !!bpf_prog_run_save_cb(info->filter, (struct sk_buff *)skb);
+}
+
+static void bpf_mt_destroy_v1(const struct xt_mtdtor_param *par)
+{
+	const struct xt_bpf_info_v1 *info = par->matchinfo;
+
+	/* v1 checkentry only stores a verified socket-filter bpf_prog. */
+	if (info->mode == XT_BPF_MODE_BYTECODE)
+		bpf_prog_destroy(info->filter);
+	else
+		bpf_prog_put(info->filter);
+}
+
+static struct xt_match bpf_mt_reg[] __read_mostly = {
+	{
 	.name		= "bpf",
 	.revision	= 0,
 	.family		= NFPROTO_UNSPEC,
@@ -57,16 +140,27 @@ static struct xt_match bpf_mt_reg __read_mostly = {
 	.destroy	= bpf_mt_destroy,
 	.matchsize	= sizeof(struct xt_bpf_info),
 	.me		= THIS_MODULE,
+	},
+	{
+		.name		= "bpf",
+		.revision	= 1,
+		.family		= NFPROTO_UNSPEC,
+		.checkentry	= bpf_mt_check_v1,
+		.match		= bpf_mt_v1,
+		.destroy	= bpf_mt_destroy_v1,
+		.matchsize	= sizeof(struct xt_bpf_info_v1),
+		.me		= THIS_MODULE,
+	},
 };
 
 static int __init bpf_mt_init(void)
 {
-	return xt_register_match(&bpf_mt_reg);
+	return xt_register_matches(bpf_mt_reg, ARRAY_SIZE(bpf_mt_reg));
 }
 
 static void __exit bpf_mt_exit(void)
 {
-	xt_unregister_match(&bpf_mt_reg);
+	xt_unregister_matches(bpf_mt_reg, ARRAY_SIZE(bpf_mt_reg));
 }
 
 module_init(bpf_mt_init);
