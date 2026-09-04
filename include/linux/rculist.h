@@ -18,6 +18,15 @@
  * be used anywhere you would want to use a list_empty_rcu().
  */
 
+/* 3.10 predates the RCU-visible list-head initializer used by newer TC. */
+#ifndef INIT_LIST_HEAD_RCU
+static inline void INIT_LIST_HEAD_RCU(struct list_head *list)
+{
+	ACCESS_ONCE(list->next) = list;
+	ACCESS_ONCE(list->prev) = list;
+}
+#endif
+
 /*
  * return the ->next pointer of a list_head in an rcu safe
  * way, we must not access it directly
