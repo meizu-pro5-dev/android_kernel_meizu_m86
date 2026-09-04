@@ -423,6 +423,19 @@ config KPROBE_EVENT
 	  This option is also required by perf-probe subcommand of perf tools.
 	  If you want to use perf tools, this option is strongly recommended.
 
+config BPF_EVENTS
+	depends on BPF_SYSCALL
+	depends on PERF_EVENTS
+	depends on TRACEPOINTS
+	depends on EVENT_TRACING
+	depends on BPF_PERF_EVENT
+	bool
+	default y
+	help
+	  Allow eBPF programs to attach to perf tracepoint events.  Kprobe
+	  program objects are accepted by the verifier, but an attach requires
+	  a configured dynamic kprobe event backend.
+
 config UPROBE_EVENT
 	bool "Enable uprobes-based dynamic events"
 	depends on ARCH_SUPPORTS_UPROBES
@@ -579,4 +592,3 @@ config RING_BUFFER_STARTUP_TEST
 endif # FTRACE
 
 endif # TRACING_SUPPORT
-

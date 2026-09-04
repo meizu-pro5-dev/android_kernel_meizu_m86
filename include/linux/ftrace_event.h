@@ -11,6 +11,7 @@ struct trace_array;
 struct trace_buffer;
 struct tracer;
 struct dentry;
+struct bpf_prog;
 
 struct trace_print_flags {
 	unsigned long		mask;
@@ -202,6 +203,8 @@ enum {
 	TRACE_EVENT_FL_NO_SET_FILTER_BIT,
 	TRACE_EVENT_FL_IGNORE_ENABLE_BIT,
 	TRACE_EVENT_FL_WAS_ENABLED_BIT,
+	TRACE_EVENT_FL_KPROBE_BIT,
+	TRACE_EVENT_FL_UPROBE_BIT,
 };
 
 /*
@@ -220,7 +223,11 @@ enum {
 	TRACE_EVENT_FL_NO_SET_FILTER	= (1 << TRACE_EVENT_FL_NO_SET_FILTER_BIT),
 	TRACE_EVENT_FL_IGNORE_ENABLE	= (1 << TRACE_EVENT_FL_IGNORE_ENABLE_BIT),
 	TRACE_EVENT_FL_WAS_ENABLED	= (1 << TRACE_EVENT_FL_WAS_ENABLED_BIT),
+	TRACE_EVENT_FL_KPROBE		= (1 << TRACE_EVENT_FL_KPROBE_BIT),
+	TRACE_EVENT_FL_UPROBE		= (1 << TRACE_EVENT_FL_UPROBE_BIT),
 };
+
+#define TRACE_EVENT_FL_UKPROBE (TRACE_EVENT_FL_KPROBE | TRACE_EVENT_FL_UPROBE)
 
 struct ftrace_event_call {
 	struct list_head	list;
@@ -244,8 +251,17 @@ struct ftrace_event_call {
 #ifdef CONFIG_PERF_EVENTS
 	int				perf_refcount;
 	struct hlist_head __percpu	*perf_events;
+	struct bpf_prog_array __rcu	*prog_array;
 #endif
 };
+
+#ifdef CONFIG_PERF_EVENTS
+static inline bool bpf_prog_array_valid(struct ftrace_event_call *call)
+{
+	/* This is only a lockless fast-path hint; dispatch takes RCU. */
+	return !!READ_ONCE(call->prog_array);
+}
+#endif
 
 struct trace_array;
 struct ftrace_subsystem_dir;
@@ -331,6 +347,26 @@ extern int trace_define_field(struct ftrace_event_call *call, const char *type,
 			      int is_signed, int filter_type);
 extern int trace_add_event_call(struct ftrace_event_call *call);
 extern int trace_remove_event_call(struct ftrace_event_call *call);
+extern int trace_event_get_offsets(struct ftrace_event_call *call);
+
+#ifdef CONFIG_BPF_EVENTS
+unsigned int trace_call_bpf(struct ftrace_event_call *call, void *ctx);
+int perf_event_attach_bpf_prog(struct perf_event *event,
+				       struct bpf_prog *prog);
+void perf_event_detach_bpf_prog(struct perf_event *event);
+#else
+static inline unsigned int trace_call_bpf(struct ftrace_event_call *call,
+						void *ctx)
+{
+	return 1;
+}
+static inline int perf_event_attach_bpf_prog(struct perf_event *event,
+						struct bpf_prog *prog)
+{
+	return -EOPNOTSUPP;
+}
+static inline void perf_event_detach_bpf_prog(struct perf_event *event) { }
+#endif
 
 #define is_signed_type(type)	(((type)(-1)) < (type)1)
 
@@ -367,8 +403,13 @@ extern void perf_trace_del(struct perf_event *event, int flags);
 extern int  ftrace_profile_set_filter(struct perf_event *event, int event_id,
 				     char *filter_str);
 extern void ftrace_profile_free_filter(struct perf_event *event);
+extern void perf_trace_buf_update(void *record, u16 type);
 extern void *perf_trace_buf_prepare(int size, unsigned short type,
 				    struct pt_regs *regs, int *rctxp);
+extern void perf_trace_run_bpf_submit(void *raw_data, int size, int rctx,
+				       struct ftrace_event_call *call, u64 count,
+				       struct pt_regs *regs, struct hlist_head *head,
+				       struct task_struct *task);
 
 static inline void
 perf_trace_buf_submit(void *raw_data, int size, int rctx, u64 addr,

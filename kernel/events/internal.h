@@ -81,21 +81,19 @@ static inline unsigned long perf_data_size(struct ring_buffer *rb)
 	return rb->nr_pages << (PAGE_SHIFT + page_order(rb));
 }
 
-#define DEFINE_OUTPUT_COPY(func_name, memcpy_func)			\
-static inline unsigned int						\
-func_name(struct perf_output_handle *handle,				\
-	  const void *buf, unsigned int len)				\
+#define __DEFINE_OUTPUT_COPY_BODY(advance_buf, memcpy_func, ...)	\
 {									\
 	unsigned long size, written;					\
 									\
 	do {								\
 		size = min_t(unsigned long, handle->size, len);		\
 									\
-		written = memcpy_func(handle->addr, buf, size);		\
+		written = memcpy_func(__VA_ARGS__);				\
 									\
 		len -= written;						\
 		handle->addr += written;				\
-		buf += written;						\
+		if (advance_buf)						\
+			buf += written;						\
 		handle->size -= written;				\
 		if (!handle->size) {					\
 			struct ring_buffer *rb = handle->rb;		\
@@ -108,6 +106,23 @@ func_name(struct perf_output_handle *handle,				\
 	} while (len && written == size);				\
 									\
 	return len;							\
+}
+
+/* Standard and context-aware copies share the same ring-buffer walker. */
+#define DEFINE_OUTPUT_COPY(func_name, memcpy_func)			\
+static inline unsigned long						\
+func_name(struct perf_output_handle *handle,				\
+		  const void *buf, unsigned long len)				\
+__DEFINE_OUTPUT_COPY_BODY(true, memcpy_func, handle->addr, buf, size)
+
+static inline unsigned long
+__output_custom(struct perf_output_handle *handle, perf_copy_f copy_func,
+		const void *buf, unsigned long len)
+{
+	unsigned long orig_len = len;
+
+	__DEFINE_OUTPUT_COPY_BODY(false, copy_func, handle->addr, buf,
+				 orig_len - len, size)
 }
 
 static inline int memcpy_common(void *dst, const void *src, size_t n)
@@ -127,6 +142,12 @@ DEFINE_OUTPUT_COPY(__output_skip, MEMCPY_SKIP)
 #endif
 
 DEFINE_OUTPUT_COPY(__output_copy_user, arch_perf_out_copy_user)
+
+static __always_inline bool
+perf_raw_frag_last(const struct perf_raw_frag *frag)
+{
+	return frag->pad < sizeof(u64);
+}
 
 /* Callchain handling */
 extern struct perf_callchain_entry *

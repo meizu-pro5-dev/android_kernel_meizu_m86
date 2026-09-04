@@ -176,6 +176,23 @@ static void trace_destroy_fields(struct ftrace_event_call *call)
 	}
 }
 
+/* Return the last fixed-width field visible to a tracepoint BPF program.
+ * Dynamic arrays are intentionally excluded from this bound. */
+int trace_event_get_offsets(struct ftrace_event_call *call)
+{
+	struct ftrace_event_field *tail;
+	struct list_head *head;
+
+	head = trace_get_fields(call);
+	if (list_empty(head))
+		return 0;
+
+	/* Fields are prepended, so the first entry has the largest offset. */
+	tail = list_first_entry(head, struct ftrace_event_field, link);
+	return tail->offset + tail->size;
+}
+EXPORT_SYMBOL_GPL(trace_event_get_offsets);
+
 int trace_event_raw_init(struct ftrace_event_call *call)
 {
 	int id;
