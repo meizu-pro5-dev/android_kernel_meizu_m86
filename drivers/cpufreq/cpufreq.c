@@ -748,6 +748,36 @@ static int cpufreq_add_dev_symlink(unsigned int cpu,
 	return ret;
 }
 
+/* Keep the legacy cpuN/cpufreq ABI and expose the same live policy through
+ * cpufreq/policyN for Android's time-in-state reader. A sysfs link follows
+ * kobject_move() when the managing CPU goes offline. The ID is the first
+ * related CPU, not the current (hotplug-dependent) managing CPU.
+ */
+static int cpufreq_add_policy_link(struct cpufreq_policy *policy)
+{
+	char name[32];
+	int ret;
+
+	snprintf(name, sizeof(name), "policy%u",
+		 cpumask_first(policy->related_cpus));
+	ret = sysfs_create_link(cpufreq_global_kobject, &policy->kobj, name);
+	if (!ret)
+		policy->sysfs_policy_link = true;
+	return ret;
+}
+
+static void cpufreq_remove_policy_link(struct cpufreq_policy *policy)
+{
+	char name[32];
+
+	if (!policy->sysfs_policy_link)
+		return;
+	snprintf(name, sizeof(name), "policy%u",
+		 cpumask_first(policy->related_cpus));
+	sysfs_remove_link(cpufreq_global_kobject, name);
+	policy->sysfs_policy_link = false;
+}
+
 static int cpufreq_add_dev_interface(unsigned int cpu,
 				     struct cpufreq_policy *policy,
 				     struct device *dev)
@@ -799,6 +829,10 @@ static int cpufreq_add_dev_interface(unsigned int cpu,
 	if (ret)
 		goto err_out_kobj_put;
 
+	ret = cpufreq_add_policy_link(policy);
+	if (ret)
+		goto err_out_kobj_put;
+
 	memcpy(&new_policy, policy, sizeof(struct cpufreq_policy));
 	/* assure that the starting sequence is run in __cpufreq_set_policy */
 	policy->governor = NULL;
@@ -816,8 +850,7 @@ static int cpufreq_add_dev_interface(unsigned int cpu,
 	return ret;
 
 err_out_kobj_put:
-	kobject_put(&policy->kobj);
-	wait_for_completion(&policy->kobj_unregister);
+	/* cpufreq_add_dev owns the single kobject release on failure. */
 	return ret;
 }
 
@@ -984,6 +1017,7 @@ static int cpufreq_add_dev(struct device *dev, struct subsys_interface *sif)
 	return 0;
 
 err_out_unregister:
+	cpufreq_remove_policy_link(policy);
 	write_lock_irqsave(&cpufreq_driver_lock, flags);
 	for_each_cpu(j, policy->cpus)
 		per_cpu(cpufreq_cpu_data, j) = NULL;
@@ -1101,6 +1135,7 @@ static int __cpufreq_remove_dev(struct device *dev, struct subsys_interface *sif
 
 	/* If cpu is last user of policy, free policy */
 	if (cpus == 1) {
+		cpufreq_remove_policy_link(data);
 		if (cpufreq_driver->target)
 			__cpufreq_governor(data, CPUFREQ_GOV_POLICY_EXIT);
 

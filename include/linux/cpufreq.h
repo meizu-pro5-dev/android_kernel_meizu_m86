@@ -116,6 +116,7 @@ struct cpufreq_policy {
 	struct cpufreq_real_policy	user_policy;
 
 	struct kobject		kobj;
+	bool			sysfs_policy_link;
 	struct completion	kobj_unregister;
 };
 
