@@ -2250,8 +2250,23 @@ wl_cfgp2p_set_p2p_ps(struct bcm_cfg80211 *cfg, struct net_device *ndev, char* bu
 	struct net_device *dev;
 
 	CFGP2P_DBG((" Enter\n"));
+	/* Android uses this command for legacy STA power save as well as P2P.
+	 * A STA has no P2P virtual interface: apply PM to the requested netdev,
+	 * not to a P2P connection which may belong to another interface.
+	 */
+	if (sscanf(buf, "%10d %10d %10d", &legacy_ps, &ps, &ctw) != 3)
+		return -EINVAL;
+	if (ps == -1 && ctw == -1) {
+		if (legacy_ps != PM_OFF && legacy_ps != PM_MAX)
+			return -EINVAL;
+		ret = wldev_ioctl(ndev, WLC_SET_PM, &legacy_ps,
+				sizeof(legacy_ps), true);
+		if (ret)
+			return ret;
+		wl_cfg80211_update_power_mode(ndev);
+		return 0;
+	}
 	if (cfg->p2p && cfg->p2p->vif_created) {
-		sscanf(buf, "%10d %10d %10d", &legacy_ps, &ps, &ctw);
 		CFGP2P_DBG((" Enter legacy_ps %d ps %d ctw %d\n", legacy_ps, ps, ctw));
 		dev = wl_to_p2p_bss_ndev(cfg, P2PAPI_BSSCFG_CONNECTION);
 		if (ctw != -1) {
