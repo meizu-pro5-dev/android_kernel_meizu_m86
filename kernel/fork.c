@@ -1316,6 +1316,9 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 	p->default_timer_slack_ns = current->timer_slack_ns;
 
 	task_io_accounting_init(&p->ioac);
+#ifdef CONFIG_UID_SYS_STATS
+	p->uid_sys_stats_accounted = false;
+#endif
 	acct_clear_integrals(p);
 
 	posix_cpu_timers_init(p);

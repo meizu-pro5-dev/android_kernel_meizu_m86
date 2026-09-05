@@ -524,8 +524,17 @@ config LATTICE_ECP3_CONFIG
 
 config UID_CPUTIME
 	tristate "Per-UID cpu time statistics"
+	depends on !UID_SYS_STATS
 	help
 	  Per UID based cpu time statistics exported to /proc/uid_cputime
+
+config UID_SYS_STATS
+	bool "Per-UID CPU and I/O statistics"
+	depends on TASK_XACCT && TASK_IO_ACCOUNTING
+	select PROFILING
+	help
+	  Export Android per-UID CPU time, foreground/background I/O and fsync
+	  accounting through /proc/uid_cputime, /proc/uid_io and /proc/uid_procstat.
 
 config SRAM
 	bool "Generic on-chip SRAM driver"
