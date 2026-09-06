@@ -30,6 +30,8 @@
 #include <linux/suspend.h>
 #include <linux/cpufreq.h>
 
+#include "march_policy.h"
+
 #define DEFAULT_CLUSTER1_HOTPLUG_IN_LOAD_THRSHD 240
 #define DEFAULT_CLUSTER1_HOTPLUG_OUT_LOAD_THRSHD 240
 
@@ -58,19 +60,21 @@ static DEFINE_PER_CPU(struct cpu_load_info, cpuload);
 #define CPU_NR_THRESHOLD               ((THREAD_CAPACITY << 1) - (THREAD_CAPACITY >> 1))
 
 /* HotPlug Driver controls */
+static int set_march_parameter(const char *val, struct kernel_param *kp);
+#define march_parameter(name) \
+	module_param_call(name, set_march_parameter, param_get_uint, &name, 0664)
 static unsigned int min_cpus_online = DEFAULT_MIN_CPUS_ONLINE;
-module_param(min_cpus_online, uint, 0664);
+march_parameter(min_cpus_online);
 
 
-static unsigned int max_cpus_online_tmp = DEFAULT_MAX_CPUS_ONLINE;
 static unsigned int max_cpus_online = DEFAULT_MAX_CPUS_ONLINE;
-module_param(max_cpus_online, uint, 0664);
+march_parameter(max_cpus_online);
 
 static unsigned int min_cpu_up_time = DEFAULT_MIN_UP_TIME;
 module_param(min_cpu_up_time, uint, 0664);
 
-static unsigned int min_cpu_boosted = 2;
-module_param(min_cpu_boosted, uint, 0664);
+static unsigned int min_cpu_boosted = 0;
+march_parameter(min_cpu_boosted);
 
 static unsigned int interaction_boost_ms = 400;
 module_param(interaction_boost_ms, uint, 0664);
@@ -80,7 +84,7 @@ static unsigned int cpu_nr_run_threshold = CPU_NR_THRESHOLD;
 module_param(cpu_nr_run_threshold, uint, 0664);
 
 static unsigned int current_profile_no = 0;
-module_param(current_profile_no, uint, 0664);
+march_parameter(current_profile_no);
 
 static unsigned int nr_run_thresholds_high[] = {
         100,
@@ -126,7 +130,7 @@ static unsigned int *nr_run_profiles[] = {
 };
 
 static unsigned int cl1_booster = 1;
-module_param(cl1_booster, uint, 0664);
+march_parameter(cl1_booster);
 
 static DEFINE_MUTEX(march_hotplug_lock);
 static DEFINE_MUTEX(march_thread_lock);
@@ -165,6 +169,36 @@ unsigned int cluster1_hotplug_in_threshold_by_hmp = 840;
 
 bool lcd_is_on = true;
 static bool in_suspend_prepared = false;
+
+static int set_march_parameter(const char *val, struct kernel_param *kp)
+{
+	unsigned int value, lower = 0, upper;
+	int ret = kstrtouint(val, 0, &value);
+
+	if (ret)
+		return ret;
+	if (kp->arg == &current_profile_no)
+		upper = ARRAY_SIZE(nr_run_profiles) - 1;
+	else if (kp->arg == &cl1_booster)
+		upper = 1;
+	else if (kp->arg == &min_cpu_boosted)
+		upper = 4;
+	else {
+		lower = 1;
+		upper = DEFAULT_MAX_CPUS_ONLINE;
+	}
+	if (value < lower || value > upper)
+		return -EINVAL;
+	mutex_lock(&march_thread_lock);
+	*(unsigned int *)kp->arg = value;
+	if (march_hotplug_task && !IS_ERR(march_hotplug_task))
+		wake_up_process(march_hotplug_task);
+	mutex_unlock(&march_thread_lock);
+	return 0;
+}
+
+static int march_apply_targets_locked(unsigned int little, unsigned int big);
+static void march_update_targets_locked(void);
 
 static unsigned int cluster1_stay_count_by_hmp = false;
 static unsigned int cluster1_init_stay_count_by_hmp =DEFAULT_CLUSTER1_STAY_CNT_HMP_MIGRAION;
@@ -411,6 +445,7 @@ static int fb_state_change(struct notifier_block *nb,
 
 	blank = *(int *)evdata->data;
 
+	mutex_lock(&march_thread_lock);
 	switch (blank) {
 	case FB_BLANK_POWERDOWN:
 		lcd_is_on = false;
@@ -424,8 +459,6 @@ static int fb_state_change(struct notifier_block *nb,
 		if (pm_qos_request_active(&cluster0_num_max_qos))
 			pm_qos_update_request(&cluster0_num_max_qos, 1);
                 
-                max_cpus_online_tmp = max_cpus_online;
-                max_cpus_online = 3;
 
 //#ifdef CONFIG_BCMDHD_PCIE
 //		}
@@ -443,13 +476,13 @@ static int fb_state_change(struct notifier_block *nb,
 			pm_qos_update_request(&cluster0_num_max_qos, NR_CLUST0_CPUS);
         	set_curr_status(CURR_NORMAL);
 
-                max_cpus_online = max_cpus_online_tmp;
 
 		pr_info("LCD is on %d\n",get_curr_status());
 		break;
 	default:
 		break;
 	}
+	mutex_unlock(&march_thread_lock);
 
 	return NOTIFY_OK;
 }
@@ -508,17 +541,12 @@ static int __ref ready_for_sleep(void)
 
 static int __ref ready_for_wakeup(void)
 {
-	int ret  = 0;
-	int cpu = 0;
-	for_each_cpu_and(cpu, &store_cpu, cpu_possible_mask) {
-		if (!cpu_online(cpu)) {
-			ret = cpu_up(cpu);
-			if (ret) {
-				pr_err("[%s]: up %d failed\n",__func__, cpu);
-			}
-		}
-	}
-	return ret;
+	struct cpumask little, big;
+	cpumask_and(&little, &store_cpu, &hmp_slow_cpu_mask);
+	cpumask_and(&big, &store_cpu, &hmp_fast_cpu_mask);
+	/* CPU0 was not saved because it stays online during suspend. */
+	return march_apply_targets_locked(cpumask_weight(&little) + 1,
+			cpumask_weight(&big));
 }
 
 //kek
@@ -538,29 +566,19 @@ static void update_per_cpu_stat(void)
             }
 }
 
-static int __ref change_core_num_cluster0(int target_num, int use_target)
+static int __ref change_core_num_cluster0(int target_num, bool force_down)
 {
 	int ret = 0;
 	int cur_num, val, i = 0; //, l_nr_threshold = 0;
-	int max_limit, min_limit;
         struct cpu_load_info *pcpu;
 
 	mutex_lock(&cluster0_hotplug_lock);
 
 	cur_num = get_online_cpu_num_on_cluster(CL_ZERO);
 
-	max_limit = (int)pm_qos_request(PM_QOS_CLUSTER0_NUM_MAX);
-	min_limit = (int)pm_qos_request(PM_QOS_CLUSTER0_NUM_MIN);
-
-	if (get_curr_status() == CURR_NORMAL && use_target == 0) {
-		target_num = max_limit;
-	} else {
-		target_num = max(target_num, min_limit);
-	}
-
 	if (target_num != cur_num) {
 		if (log_onoff)
-			printk("[%s]: cur:%d target:%d max:%d min:%d\n", __func__, cur_num, target_num, max_limit,min_limit);
+			printk("[%s]: cur:%d target:%d\n", __func__, cur_num, target_num);
 	}
 
 	if (target_num > cur_num) {
@@ -570,8 +588,7 @@ static int __ref change_core_num_cluster0(int target_num, int use_target)
 			ret = cpu_up(i);
 			if (ret) {
 				pr_err("[%s]: up %d failed\n", __func__, i);
-				mutex_unlock(&cluster0_hotplug_lock);
-				return ret;
+				goto out;
 			    }
                         pcpu = &per_cpu(cpuload, i);
                         pcpu->cpu_up_time = ktime_to_ms(ktime_get());
@@ -583,17 +600,20 @@ static int __ref change_core_num_cluster0(int target_num, int use_target)
 		for (i = NR_CLUST0_CPUS - 1; i > 0 && val > 0; i--) {
 		    if (cpu_online(i)){
                         pcpu = &per_cpu(cpuload, i);
-		        if((ktime_to_ms(ktime_get()) - pcpu->cpu_up_time) >= min_cpu_up_time) {
+		        if (force_down || (ktime_to_ms(ktime_get()) - pcpu->cpu_up_time) >= min_cpu_up_time) {
 //                                l_nr_threshold = cpu_nr_run_threshold << 1 / (num_online_cpus());
 //				pr_err("[%s]: kek cpu%d nr: %lu l_nr: %d\n", __func__, i, pcpu->cpu_nr_running, l_nr_threshold);
 //                                if (pcpu->cpu_nr_running < l_nr_threshold)
-				     cpu_down(i);
+				     ret = cpu_down(i);
+				     if (ret)
+					goto out;
+				     val--;
 //					reset_calc_load_core(i);
                                 }
-			val--;
 		    }
 		}
 	}
+out:
 	set_cur_cluster0_core_num(get_online_cpu_num_on_cluster(CL_ZERO));
 	mutex_unlock(&cluster0_hotplug_lock);
 
@@ -620,8 +640,7 @@ static __ref int change_core_num_cluster1(int cluster_on_off)
 					ret = cpu_up(i);
 					if (ret) {
 						pr_err("[%s]: up %d failed\n", __func__, i);
-						mutex_unlock(&cluster1_hotplug_lock);
-						return ret;
+						goto out;
 					}
                                         pcpu = &per_cpu(cpuload, i);
                                         pcpu->cpu_up_time = ktime_to_ms(ktime_get());
@@ -633,12 +652,15 @@ static __ref int change_core_num_cluster1(int cluster_on_off)
 		for (i = setup_max_cpus - 1; i >= NR_CLUST0_CPUS && val > 0; i--) {
 			if (cpu_online(i)) {
                             pcpu = &per_cpu(cpuload, i);
-	        		 cpu_down(i);
+				ret = cpu_down(i);
+				 if (ret)
+					goto out;
 					//reset_calc_load_core(i);
 				val--;
 		    }
 		}
 	}
+out:
 	set_cur_cluster1_core_num(get_online_cpu_num_on_cluster(CL_ONE));
 	mutex_unlock(&cluster1_hotplug_lock);
 	return ret;
@@ -648,7 +670,6 @@ static unsigned int interaction_boost;
 
 static int set_interaction_boost(const char *val, struct kernel_param *kp)
 {
-	unsigned int target;
 	int ret;
 
 	ret = param_set_uint(val, kp);
@@ -662,11 +683,7 @@ static int set_interaction_boost(const char *val, struct kernel_param *kp)
 	mutex_lock(&march_thread_lock);
 	interaction_boost_until = jiffies +
 		msecs_to_jiffies(interaction_boost_ms);
-	if (lcd_is_on && current_profile_no != 2) {
-		target = max_t(unsigned int,
-			get_online_cpu_num_on_cluster(CL_ONE), min_cpu_boosted);
-		change_core_num_cluster1(target);
-	}
+	march_update_targets_locked();
 	interaction_boost = 0;
 	mutex_unlock(&march_thread_lock);
 
@@ -679,22 +696,15 @@ module_param_call(interaction_boost, set_interaction_boost, param_get_uint,
 
 static void event_hotplug_cluster0_work(struct work_struct *work)
 {
-	int target_num;
 	mutex_lock(&march_thread_lock);
-	target_num = (int)pm_qos_request(PM_QOS_CLUSTER0_NUM_MIN);
-	change_core_num_cluster0(target_num,0);
+	march_update_targets_locked();
 	mutex_unlock(&march_thread_lock);
 }
 
 static void event_hotplug_cluster1_work(struct work_struct *work)
 {
-	int target_num;
 	mutex_lock(&march_thread_lock);
-	target_num = (int)pm_qos_request(PM_QOS_CLUSTER1_NUM_MIN);
-	if (target_num == 0)
-		change_core_num_cluster1(0);
-	else
-		change_core_num_cluster1(1);
+	march_update_targets_locked();
 	mutex_unlock(&march_thread_lock);
 }
 
@@ -824,14 +834,20 @@ static unsigned int calculate_thread_stats(void)
 	unsigned int avg_nr_run = avg_nr_running();
 	unsigned int nr_run;
 	unsigned int threshold_size;
-	unsigned int *current_profile = nr_run_profiles[current_profile_no];
+	unsigned int profile = current_profile_no;
+	unsigned int *current_profile;
 
-	if(current_profile_no == 0)
+	if (profile >= ARRAY_SIZE(nr_run_profiles))
+		profile = 0;
+	current_profile = nr_run_profiles[profile];
+	if (profile == 0)
 		threshold_size = ARRAY_SIZE(nr_run_thresholds_high);
-	else if(current_profile_no == 1)
+	else if (profile == 1)
 		threshold_size = ARRAY_SIZE(nr_run_thresholds_balanced);
-	else if(current_profile_no == 2)
+	else if (profile == 2)
 		threshold_size = ARRAY_SIZE(nr_run_thresholds_eco);
+	else
+		threshold_size = ARRAY_SIZE(nr_run_thresholds_disable);
 
 	for (nr_run = 1; nr_run < threshold_size; nr_run++) {
 		unsigned int nr_threshold;
@@ -844,10 +860,79 @@ static unsigned int calculate_thread_stats(void)
 	return nr_run;
 }
 
+/* Every ordinary hotplug entry point uses the same constraint resolution.
+ * Safety ceilings win over conflicting minimum/boost requests.
+ */
+static int march_apply_targets_locked(unsigned int little, unsigned int big)
+{
+	struct march_limits limits;
+	unsigned int target[2] = { little, big };
+	unsigned int actual[2], room;
+	bool force_down;
+	int ret = 0, error;
+
+	limits.min[0] = clamp_t(int, pm_qos_request(PM_QOS_CLUSTER0_NUM_MIN), 1, NR_CLUST0_CPUS);
+	limits.max[0] = clamp_t(int, pm_qos_request(PM_QOS_CLUSTER0_NUM_MAX), 1, NR_CLUST0_CPUS);
+	limits.min[1] = clamp_t(int, pm_qos_request(PM_QOS_CLUSTER1_NUM_MIN), 0, NR_CLUST1_CPUS);
+	limits.max[1] = clamp_t(int, pm_qos_request(PM_QOS_CLUSTER1_NUM_MAX), 0, NR_CLUST1_CPUS);
+	limits.total_min = clamp_t(unsigned int, min_cpus_online, 1, setup_max_cpus);
+	limits.total_max = clamp_t(unsigned int, max_cpus_online, 1, setup_max_cpus);
+	march_resolve_targets(target, &limits);
+
+	actual[0] = get_online_cpu_num_on_cluster(CL_ZERO);
+	actual[1] = get_online_cpu_num_on_cluster(CL_ONE);
+	force_down = actual[0] > limits.max[0] || actual[1] > limits.max[1] ||
+		actual[0] + actual[1] > limits.total_max;
+	/* Down before up, and account for failures or the little-core dwell time. */
+	if (actual[1] > target[1])
+		ret = change_core_num_cluster1(target[1]);
+	if (actual[0] > target[0]) {
+		error = change_core_num_cluster0(target[0], force_down);
+		if (error)
+			ret = error;
+	}
+	actual[0] = get_online_cpu_num_on_cluster(CL_ZERO);
+	actual[1] = get_online_cpu_num_on_cluster(CL_ONE);
+	room = limits.total_max > actual[1] ? limits.total_max - actual[1] : 0;
+	if (actual[0] < min(target[0], room)) {
+		error = change_core_num_cluster0(min(target[0], room), false);
+		if (error)
+			ret = error;
+	}
+	actual[0] = get_online_cpu_num_on_cluster(CL_ZERO);
+	room = limits.total_max > actual[0] ? limits.total_max - actual[0] : 0;
+	if (actual[1] < min(target[1], room)) {
+		error = change_core_num_cluster1(min(target[1], room));
+		if (error)
+			ret = error;
+	}
+	if (ret)
+		pr_warn_ratelimited("March: cannot apply core targets: %d\n", ret);
+	return ret;
+}
+
+static void march_update_targets_locked(void)
+{
+	unsigned int total, little, big;
+	bool interaction_active;
+
+	if (get_hotplug_running_status() || in_suspend_prepared)
+		return;
+	total = calculate_thread_stats();
+	little = min_t(unsigned int, total, NR_CLUST0_CPUS);
+	big = total - little;
+	interaction_active = lcd_is_on && current_profile_no != 2 &&
+		time_before(jiffies, interaction_boost_until);
+	if ((lcd_is_on && current_profile_no == 0) || interaction_active ||
+	    (lcd_is_on && cl1_booster && get_cur_cluster1_booster_value() > 0))
+		big = max(big, min_cpu_boosted);
+	update_per_cpu_stat();
+	march_apply_targets_locked(little, big);
+}
+
 static int on_run(void *data)
 {
 	int on_cpu = 0;
-        int target = 1;
 
         struct cpumask thread_cpumask;
 
@@ -857,52 +942,12 @@ static int on_run(void *data)
 
 	mutex_lock(&march_thread_lock);
 	while (!kthread_should_stop()) {
-		unsigned int cluster1_core_num, cluster0_core_num;
-		bool interaction_active;
-
 		if (get_hotplug_running_status()) {
 			mutex_unlock(&march_thread_lock);
 			goto Sleep_Out;
 		}
 
-                target = calculate_thread_stats();
-
-                if (target < min_cpus_online)
-                    target = min_cpus_online;
-                else if (target > max_cpus_online)
-                    target = max_cpus_online;
-
-                if(target <= 4) {
-                    cluster0_core_num = target;
-                    cluster1_core_num = 0;
-                } else {
-                    cluster0_core_num = 4;
-                    cluster1_core_num = target - 4;
-                }
-
-		interaction_active = lcd_is_on && current_profile_no != 2 &&
-			time_before(jiffies, interaction_boost_until);
-
-		/* High mode and a live interaction require an A57 floor. Apply
-		 * this before comparing the desired and current cluster layout.
-		 */
-		if (lcd_is_on && current_profile_no == 0)
-			cluster1_core_num = max(cluster1_core_num,
-				min_cpu_boosted);
-		if (interaction_active || (lcd_is_on && cl1_booster != 0 &&
-			get_cur_cluster1_booster_value() > 0))
-			cluster1_core_num = max(cluster1_core_num,
-				min_cpu_boosted);
-
-                update_per_cpu_stat();
-
-		if (cluster1_core_num !=
-			get_online_cpu_num_on_cluster(CL_ONE))
-			change_core_num_cluster1(cluster1_core_num);
-
-		if (cluster0_core_num !=
-			get_online_cpu_num_on_cluster(CL_ZERO))
-			change_core_num_cluster0(cluster0_core_num,1);
+		march_update_targets_locked();
 
 		if (get_cur_cluster1_booster_value() > 0)
 			decrease_cluster1_booster();
