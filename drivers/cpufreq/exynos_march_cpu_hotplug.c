@@ -457,7 +457,7 @@ static int fb_state_change(struct notifier_block *nb,
 			pm_qos_update_request(&cluster1_num_max_qos, 0);
 
 		if (pm_qos_request_active(&cluster0_num_max_qos))
-			pm_qos_update_request(&cluster0_num_max_qos, 1);
+			pm_qos_update_request(&cluster0_num_max_qos, 3);
                 
 
 //#ifdef CONFIG_BCMDHD_PCIE
