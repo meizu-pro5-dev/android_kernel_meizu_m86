@@ -171,6 +171,7 @@ struct cpufreq_interactive_tunables {
 	unsigned int *above_hispeed_delay;
 	int nabove_hispeed_delay;
 	/* Non-zero means indefinite speed boost active */
+	spinlock_t boost_lock;
 	int boost_val;
 	/* Duration of a boot pulse in usecs */
 	int boostpulse_duration_val;
@@ -200,6 +201,8 @@ struct cpufreq_interactive_tunables {
 	unsigned int *policy;
 #ifdef CONFIG_MODE_AUTO_CHANGE
 	spinlock_t mode_lock;
+	bool auto_mode_enabled; /* Opt in after configuring the extra parameter sets. */
+	bool mode_running;
 	unsigned int mode;
 	unsigned int enforced_mode;
 	u64 mode_check_timestamp;
@@ -550,16 +553,19 @@ static unsigned int check_mode(int cpu, unsigned int cur_mode, u64 now)
 	struct cpufreq_interactive_tunables *tunables =
 		pcpu->policy->governor_data;
 
-	if (now - tunables->mode_check_timestamp < tunables->timer_rate - USEC_PER_MSEC)
+	u64 period_us = jiffies_to_usecs(tunables->timer_rate);
+	u64 early_us = period_us > USEC_PER_MSEC ? period_us - USEC_PER_MSEC : 0;
+
+	if (now - tunables->mode_check_timestamp < early_us)
 		return ret;
 
-	if (now - tunables->mode_check_timestamp > tunables->timer_rate + USEC_PER_MSEC)
-		tunables->mode_check_timestamp = now - tunables->timer_rate;
+	if (now - tunables->mode_check_timestamp > period_us + USEC_PER_MSEC)
+		tunables->mode_check_timestamp = now - period_us;
 
 	if(cpumask_test_cpu(cpu, &hmp_fast_cpu_mask)) {
 		for_each_cpu_mask(i, hmp_fast_cpu_mask) {
 			cur_loadinfo = &per_cpu(loadinfo, i);
-			if (now - cur_loadinfo->timestamp <= tunables->timer_rate + USEC_PER_MSEC) {
+			if (now - cur_loadinfo->timestamp <= period_us + USEC_PER_MSEC) {
 				total_load += cur_loadinfo->load;
 				if (cur_loadinfo->load > max_single_load)
 					max_single_load = cur_loadinfo->load;
@@ -680,6 +686,18 @@ static void exit_mode(struct cpufreq_interactive_tunables * tunables)
 
 	queue_work(mode_auto_change_minlock_wq, &mode_auto_change_minlock_work);
 }
+
+static void reset_mode_locked(struct cpufreq_interactive_tunables *tunables)
+{
+	if (tunables->mode)
+		exit_mode(tunables);
+	tunables->mode = NO_MODE;
+	tunables->mode_check_timestamp = ktime_to_us(ktime_get());
+	tunables->time_in_single_enter = 0;
+	tunables->time_in_single_exit = 0;
+	tunables->time_in_multi_enter = 0;
+	tunables->time_in_multi_exit = 0;
+}
 #endif
 
 static void cpufreq_interactive_timer(unsigned long data)
@@ -719,7 +737,9 @@ static void cpufreq_interactive_timer(unsigned long data)
 #ifdef CONFIG_MODE_AUTO_CHANGE
 	if (!suspended) {
 		spin_lock_irqsave(&tunables->mode_lock, flags);
-		if (tunables->enforced_mode)
+		if (!tunables->auto_mode_enabled || !tunables->mode_running)
+			new_mode = NO_MODE;
+		else if (tunables->enforced_mode)
 			new_mode = tunables->enforced_mode;
 		else
 			new_mode = check_mode(data, tunables->mode, now);
@@ -734,11 +754,13 @@ static void cpufreq_interactive_timer(unsigned long data)
 		spin_unlock_irqrestore(&tunables->mode_lock, flags);
 	}
 #endif
+	spin_lock_irqsave(&tunables->boost_lock, flags);
+	tunables->boosted = tunables->boost_val || now < tunables->boostpulse_endtime;
+	spin_unlock_irqrestore(&tunables->boost_lock, flags);
 	spin_lock_irqsave(&pcpu->target_freq_lock, flags);
 	do_div(cputime_speedadj, delta_time);
 	loadadjfreq = (unsigned int)cputime_speedadj * 100;
 	cpu_load = loadadjfreq / pcpu->policy->cur;
-	tunables->boosted = tunables->boost_val || now < tunables->boostpulse_endtime;
 
 #ifdef CONFIG_PMU_COREMEM_RATIO
 	/* Get crypto load information from PMU */
@@ -1513,6 +1535,7 @@ static ssize_t store_boost(struct cpufreq_interactive_tunables *tunables,
 {
 	int ret;
 	unsigned long val;
+	unsigned long flags;
 	struct cpufreq_policy *policy = container_of(tunables->policy,
 						struct cpufreq_policy, policy);
 
@@ -1520,14 +1543,16 @@ static ssize_t store_boost(struct cpufreq_interactive_tunables *tunables,
 	if (ret < 0)
 		return ret;
 
-	tunables->boost_val = val;
+	spin_lock_irqsave(&tunables->boost_lock, flags);
+	tunables->boost_val = !!val;
+	if (!val)
+		tunables->boostpulse_endtime = 0;
+	spin_unlock_irqrestore(&tunables->boost_lock, flags);
 
-	if (tunables->boost_val) {
+	if (val) {
 		trace_cpufreq_interactive_boost("on");
-		if (!tunables->boosted)
-			cpufreq_interactive_boost(policy, tunables);
+		cpufreq_interactive_boost(policy, tunables);
 	} else {
-		tunables->boostpulse_endtime = ktime_to_us(ktime_get());
 		trace_cpufreq_interactive_unboost("off");
 	}
 
@@ -1539,6 +1564,8 @@ static ssize_t store_boostpulse(struct cpufreq_interactive_tunables *tunables,
 {
 	int ret;
 	unsigned long val;
+	unsigned long flags;
+	u64 deadline;
 	struct cpufreq_policy *policy = container_of(tunables->policy,
 						struct cpufreq_policy, policy);
 
@@ -1546,11 +1573,12 @@ static ssize_t store_boostpulse(struct cpufreq_interactive_tunables *tunables,
 	if (ret < 0)
 		return ret;
 
-	tunables->boostpulse_endtime = ktime_to_us(ktime_get()) +
-		tunables->boostpulse_duration_val;
+	spin_lock_irqsave(&tunables->boost_lock, flags);
+	deadline = ktime_to_us(ktime_get()) + tunables->boostpulse_duration_val;
+	tunables->boostpulse_endtime = max(tunables->boostpulse_endtime, deadline);
+	spin_unlock_irqrestore(&tunables->boost_lock, flags);
 	trace_cpufreq_interactive_boost("pulse");
-	if (!tunables->boosted)
-		cpufreq_interactive_boost(policy, tunables);
+	cpufreq_interactive_boost(policy, tunables);
 	return count;
 }
 
@@ -1565,12 +1593,17 @@ static ssize_t store_boostpulse_duration(struct cpufreq_interactive_tunables
 {
 	int ret;
 	unsigned long val;
+	unsigned long flags;
 
 	ret = kstrtoul(buf, 0, &val);
 	if (ret < 0)
 		return ret;
 
+	if (val > 10000000)
+		return -EINVAL;
+	spin_lock_irqsave(&tunables->boost_lock, flags);
 	tunables->boostpulse_duration_val = val;
+	spin_unlock_irqrestore(&tunables->boost_lock, flags);
 	return count;
 }
 
@@ -1594,6 +1627,41 @@ static ssize_t store_io_is_busy(struct cpufreq_interactive_tunables *tunables,
 }
 
 #ifdef CONFIG_MODE_AUTO_CHANGE
+static ssize_t show_auto_mode_enabled(struct cpufreq_interactive_tunables *tunables,
+		char *buf)
+{
+	return sprintf(buf, "%u\n", tunables->auto_mode_enabled);
+}
+
+static ssize_t store_auto_mode_enabled(struct cpufreq_interactive_tunables *tunables,
+		const char *buf, size_t count)
+{
+	unsigned long value, flags;
+	struct cpufreq_policy *policy = container_of(tunables->policy,
+			struct cpufreq_policy, policy);
+	int ret = kstrtoul(buf, 0, &value);
+
+	if (ret)
+		return ret;
+	if (value > 1)
+		return -EINVAL;
+	/* This mechanism has one HMP/QoS owner: the big-cluster policy. */
+	if (value && (!have_governor_per_policy() ||
+	    !cpumask_intersects(policy->related_cpus, &hmp_fast_cpu_mask) ||
+	    !mode_auto_change_minlock_wq))
+		return -EOPNOTSUPP;
+	spin_lock_irqsave(&tunables->mode_lock, flags);
+	if (tunables->auto_mode_enabled != !!value) {
+		reset_mode_locked(tunables);
+		tunables->enforced_mode = NO_MODE;
+		tunables->auto_mode_enabled = !!value;
+	}
+	spin_unlock_irqrestore(&tunables->mode_lock, flags);
+	if (!value && mode_auto_change_minlock_wq)
+		flush_work(&mode_auto_change_minlock_work);
+	return count;
+}
+
 static ssize_t show_mode(struct cpufreq_interactive_tunables
 		*tunables, char *buf)
 {
@@ -1605,13 +1673,30 @@ static ssize_t store_mode(struct cpufreq_interactive_tunables
 {
 	int ret;
 	long unsigned int val;
+	unsigned long flags;
 
 	ret = strict_strtoul(buf, 0, &val);
 	if (ret < 0)
 		return ret;
 
-	val &= MULTI_MODE | SINGLE_MODE | NO_MODE;
-	tunables->mode = val;
+	if (val >= MAX_PARAM_SET)
+		return -EINVAL;
+	spin_lock_irqsave(&tunables->mode_lock, flags);
+	if (val && (!tunables->auto_mode_enabled || !tunables->mode_running)) {
+		spin_unlock_irqrestore(&tunables->mode_lock, flags);
+		return -EBUSY;
+	}
+	if (val != tunables->mode) {
+		if (!val)
+			reset_mode_locked(tunables);
+		else {
+			tunables->mode = val;
+			enter_mode(tunables);
+		}
+	}
+	spin_unlock_irqrestore(&tunables->mode_lock, flags);
+	if (!val && mode_auto_change_minlock_wq)
+		flush_work(&mode_auto_change_minlock_work);
 	return count;
 }
 
@@ -1626,13 +1711,21 @@ static ssize_t store_enforced_mode(struct cpufreq_interactive_tunables
 {
 	int ret;
 	long unsigned int val;
+	unsigned long flags;
 
 	ret = strict_strtoul(buf, 0, &val);
 	if (ret < 0)
 		return ret;
 
-	val &= MULTI_MODE | SINGLE_MODE | NO_MODE;
+	if (val >= MAX_PARAM_SET)
+		return -EINVAL;
+	spin_lock_irqsave(&tunables->mode_lock, flags);
+	if (val && !tunables->auto_mode_enabled) {
+		spin_unlock_irqrestore(&tunables->mode_lock, flags);
+		return -EBUSY;
+	}
 	tunables->enforced_mode = val;
+	spin_unlock_irqrestore(&tunables->mode_lock, flags);
 	return count;
 }
 
@@ -1954,6 +2047,7 @@ show_store_gov_pol_sys(io_is_busy);
 
 #ifdef CONFIG_MODE_AUTO_CHANGE
 show_store_gov_pol_sys(mode);
+show_store_gov_pol_sys(auto_mode_enabled);
 show_store_gov_pol_sys(enforced_mode);
 show_store_gov_pol_sys(param_index);
 show_store_gov_pol_sys(multi_enter_load);
@@ -1997,6 +2091,7 @@ gov_sys_pol_attr_rw(boostpulse_duration);
 gov_sys_pol_attr_rw(io_is_busy);
 #ifdef CONFIG_MODE_AUTO_CHANGE
 gov_sys_pol_attr_rw(mode);
+gov_sys_pol_attr_rw(auto_mode_enabled);
 gov_sys_pol_attr_rw(enforced_mode);
 gov_sys_pol_attr_rw(param_index);
 gov_sys_pol_attr_rw(multi_enter_load);
@@ -2047,6 +2142,7 @@ static struct attribute *interactive_attributes_gov_sys[] = {
 	&io_is_busy_gov_sys.attr,
 #ifdef CONFIG_MODE_AUTO_CHANGE
 	&mode_gov_sys.attr,
+	&auto_mode_enabled_gov_sys.attr,
 	&enforced_mode_gov_sys.attr,
 	&param_index_gov_sys.attr,
 	&multi_enter_load_gov_sys.attr,
@@ -2088,6 +2184,7 @@ static struct attribute *interactive_attributes_gov_pol[] = {
 	&io_is_busy_gov_pol.attr,
 #ifdef CONFIG_MODE_AUTO_CHANGE
 	&mode_gov_pol.attr,
+	&auto_mode_enabled_gov_pol.attr,
 	&enforced_mode_gov_pol.attr,
 	&param_index_gov_pol.attr,
 	&multi_enter_load_gov_pol.attr,
@@ -2129,6 +2226,7 @@ static const char *interactive_sysfs[] = {
 	"io_is_busy",
 #ifdef CONFIG_MODE_AUTO_CHANGE
 	"mode",
+	"auto_mode_enabled",
 	"enforced_mode",
 	"param_index",
 	"multi_enter_load",
@@ -2336,6 +2434,7 @@ static int cpufreq_governor_interactive(struct cpufreq_policy *policy,
 		tunables->policy = &policy->policy;
 
 		spin_lock_init(&tunables->target_loads_lock);
+		spin_lock_init(&tunables->boost_lock);
 		spin_lock_init(&tunables->above_hispeed_delay_lock);
 #ifdef CONFIG_MODE_AUTO_CHANGE
 		spin_lock_init(&tunables->mode_lock);
@@ -2398,6 +2497,11 @@ static int cpufreq_governor_interactive(struct cpufreq_policy *policy,
 
 	case CPUFREQ_GOV_START:
 		mutex_lock(&gov_lock);
+#ifdef CONFIG_MODE_AUTO_CHANGE
+		spin_lock_irqsave(&tunables->mode_lock, flags);
+		tunables->mode_running = true;
+		spin_unlock_irqrestore(&tunables->mode_lock, flags);
+#endif
 
 		freq_table = cpufreq_frequency_get_table(policy->cpu);
 		if (!tunables->hispeed_freq)
@@ -2477,6 +2581,12 @@ static int cpufreq_governor_interactive(struct cpufreq_policy *policy,
 
 	case CPUFREQ_GOV_STOP:
 		mutex_lock(&gov_lock);
+#ifdef CONFIG_MODE_AUTO_CHANGE
+		spin_lock_irqsave(&tunables->mode_lock, flags);
+		tunables->mode_running = false;
+		reset_mode_locked(tunables);
+		spin_unlock_irqrestore(&tunables->mode_lock, flags);
+#endif
 		for_each_cpu(j, policy->cpus) {
 			pcpu = &per_cpu(cpuinfo, j);
 			down_write(&pcpu->enable_sem);
