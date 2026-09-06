@@ -80,12 +80,12 @@ static void adaptive_handle_event(struct kbase_device *kbdev, enum kbase_pm_poli
 	switch (event)
 	{
 		case KBASE_PM_POLICY_EVENT_IDLE:
-			data->last_idle = ktime_get_ns();
+			data->last_idle = ktime_to_ns(ktime_get());
 			break;
 
 		case KBASE_PM_POLICY_EVENT_POWER_ON:
 			threshold = kbdev->pm.default_ticks * ktime_to_ns(kbdev->pm.gpu_poweroff_time);
-			if (ktime_get_ns() - data->last_idle < threshold)
+			if (ktime_to_ns(ktime_get()) - data->last_idle < threshold)
 				kbdev->pm.poweroff_shader_ticks = kbdev->pm.default_ticks;
 			break;
 

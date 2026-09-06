@@ -28,6 +28,7 @@ struct pm_qos_request exynos5_g3d_int_qos;
 struct pm_qos_request exynos5_g3d_cpu_cluster0_min_qos;
 struct pm_qos_request exynos5_g3d_cpu_cluster1_max_qos;
 struct pm_qos_request exynos5_g3d_cpu_cluster1_min_qos;
+static int mif_max_request = PM_QOS_BUS_THROUGHPUT_MAX_DEFAULT_VALUE;
 
 #ifdef CONFIG_MALI_DVFS_USER
 struct pm_qos_request proactive_mif_min_qos;
@@ -45,6 +46,7 @@ int gpu_pm_qos_command(struct exynos_context *platform, gpu_pmqos_state state)
 
 	switch (state) {
 	case GPU_CONTROL_PM_QOS_INIT:
+		mif_max_request = PM_QOS_BUS_THROUGHPUT_MAX_DEFAULT_VALUE;
 		pm_qos_add_request(&exynos5_g3d_mif_min_qos, PM_QOS_BUS_THROUGHPUT, 0);
 		if (platform->pmqos_mif_max_clock)
 			pm_qos_add_request(&exynos5_g3d_mif_max_qos, PM_QOS_BUS_THROUGHPUT_MAX, PM_QOS_BUS_THROUGHPUT_MAX_DEFAULT_VALUE);
@@ -68,14 +70,7 @@ int gpu_pm_qos_command(struct exynos_context *platform, gpu_pmqos_state state)
 		break;
 	case GPU_CONTROL_PM_QOS_SET:
 		KBASE_DEBUG_ASSERT(platform->step >= 0);
-		if (platform->perf_gathering_status) {
-			gpu_mif_pmqos(platform, platform->table[platform->step].mem_freq);
-		} else {
-			pm_qos_update_request(&exynos5_g3d_mif_min_qos, platform->table[platform->step].mem_freq);
-			if (platform->pmqos_mif_max_clock &&
-				(platform->table[platform->step].clock >= platform->pmqos_mif_max_clock_base))
-				pm_qos_update_request(&exynos5_g3d_mif_max_qos, platform->pmqos_mif_max_clock);
-		}
+		gpu_mif_pmqos(platform, platform->table[platform->step].mem_freq);
 		if (!platform->pmqos_int_disable)
 			pm_qos_update_request(&exynos5_g3d_int_qos, platform->table[platform->step].int_freq);
 		pm_qos_update_request(&exynos5_g3d_cpu_cluster0_min_qos, platform->table[platform->step].cpu_freq);
@@ -84,6 +79,7 @@ int gpu_pm_qos_command(struct exynos_context *platform, gpu_pmqos_state state)
 		break;
 	case GPU_CONTROL_PM_QOS_RESET:
 		pm_qos_update_request(&exynos5_g3d_mif_min_qos, 0);
+		mif_max_request = PM_QOS_BUS_THROUGHPUT_MAX_DEFAULT_VALUE;
 		if (platform->pmqos_mif_max_clock)
 			pm_qos_update_request(&exynos5_g3d_mif_max_qos, PM_QOS_BUS_THROUGHPUT_MAX_DEFAULT_VALUE);
 		if (!platform->pmqos_int_disable)
@@ -106,15 +102,26 @@ int gpu_pm_qos_command(struct exynos_context *platform, gpu_pmqos_state state)
 
 int gpu_mif_pmqos(struct exynos_context *platform, int mem_freq)
 {
-	static int prev_freq;
+	int ceiling = PM_QOS_BUS_THROUGHPUT_MAX_DEFAULT_VALUE;
 	DVFS_ASSERT(platform);
 
 	if(!platform->devfreq_status)
 		return 0;
-	if(prev_freq != mem_freq)
+	if (platform->pmqos_mif_max_clock && platform->step >= 0 &&
+	    platform->table[platform->step].clock >= platform->pmqos_mif_max_clock_base)
+		ceiling = platform->pmqos_mif_max_clock;
+	/* Preserve the high-GPU protective cap without asking for a higher
+	 * MIF floor ourselves. Release it when the GPU leaves that range.
+	 * Order updates so transitions do not introduce a min > max window.
+	 */
+	mem_freq = min(mem_freq, ceiling);
+	if (ceiling < mif_max_request)
 		pm_qos_update_request(&exynos5_g3d_mif_min_qos, mem_freq);
-
-	prev_freq = mem_freq;
+	if (platform->pmqos_mif_max_clock)
+		pm_qos_update_request(&exynos5_g3d_mif_max_qos, ceiling);
+	if (ceiling >= mif_max_request)
+		pm_qos_update_request(&exynos5_g3d_mif_min_qos, mem_freq);
+	mif_max_request = ceiling;
 
 	return 0;
 }

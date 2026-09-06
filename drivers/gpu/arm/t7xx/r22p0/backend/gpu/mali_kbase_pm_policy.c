@@ -306,12 +306,13 @@ int kbase_pm_policy_init(struct kbase_device *kbdev)
 			CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	kbdev->pm.backend.gpu_poweroff_timer.function =
 			kbasep_pm_do_gpu_poweroff_callback;
-	/* MALI_SEC_INTEGRATION : using coarse_demand policy */
-	kbdev->pm.backend.pm_current_policy = policy_list[1];
+	/* Keep the m86 coarse-demand default independent of policy ordering. */
+	kbdev->pm.backend.pm_current_policy = &kbase_pm_coarse_demand_policy_ops;
 	kbdev->pm.backend.pm_current_policy->init(kbdev);
 	kbdev->pm.gpu_poweroff_time =
 			HR_TIMER_DELAY_NSEC(DEFAULT_PM_GPU_POWEROFF_TICK_NS);
-	kbdev->pm.poweroff_shader_ticks = DEFAULT_PM_POWEROFF_TICK_SHADER;
+	kbdev->pm.default_ticks = DEFAULT_PM_POWEROFF_TICK_SHADER;
+	kbdev->pm.poweroff_shader_ticks = kbdev->pm.default_ticks;
 	kbdev->pm.poweroff_gpu_ticks = DEFAULT_PM_POWEROFF_TICK_GPU;
 
 	return 0;

@@ -21,6 +21,7 @@
 #include <linux/pm_qos.h>
 #include <linux/pm_domain.h>
 #include <linux/clk.h>
+#include <linux/cpufreq_kt.h>
 #include <mach/pm_domains.h>
 #if defined(CONFIG_SOC_EXYNOS8890) && defined(CONFIG_PWRCAL)
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3, 17, 0)
@@ -40,6 +41,11 @@
 #include "gpu_control.h"
 
 static struct gpu_control_ops *ctr_ops;
+
+/* Keep the Meizu PRO5 frequency overrides exposed by gpu_sysfs. */
+unsigned int gpu_min_override = 266;
+unsigned int gpu_max_override = 772;
+unsigned int gpu_max_override_screen_off = 0;
 
 #ifdef CONFIG_MALI_RT_PM
 static struct exynos_pm_domain *gpu_get_pm_domain(void)
@@ -139,6 +145,15 @@ int gpu_control_set_clock(struct kbase_device *kbdev, int clock)
 		return -1;
 	}
 #endif
+
+	if (clock < gpu_min_override)
+		clock = gpu_min_override;
+	if (screen_is_on || gpu_max_override_screen_off == 0) {
+		if (clock > gpu_max_override)
+			clock = gpu_max_override;
+	} else if (clock > gpu_max_override_screen_off) {
+		clock = gpu_max_override_screen_off;
+	}
 
 	is_up = prev_clock < clock;
 

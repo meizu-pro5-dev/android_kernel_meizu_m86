@@ -2847,8 +2847,10 @@ static int kbase_jd_umm_map(struct kbase_context *kctx,
 			goto err_unmap_attachment;
 		}
 
-		/* MALI_SEC_INTEGRATION */
+		/* Exynos7420 on 3.10 uses the mapped DMA segment length. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 17, 0)
 		pages = PFN_UP(s->length);
+#endif
 
 		WARN_ONCE(sg_dma_len(s) & (PAGE_SIZE-1),
 		"sg_dma_len(s)=%u is not a multiple of PAGE_SIZE\n",
