@@ -31,6 +31,7 @@
 #include <linux/miscdevice.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
+#include <linux/compat.h>
 #include <asm/uaccess.h>
 
 //API includes
@@ -386,6 +387,14 @@ static void stmvl6180_work_handler(struct work_struct *work)
 
 
 	mutex_lock(&data->work_mutex);
+	/* A worker racing STOP/close must not touch the powered-off bus or
+	 * re-arm polling after cancellation. Shutdown uses this same mutex.
+	 */
+	if (!data->enable_ps_sensor) {
+		mutex_unlock(&data->work_mutex);
+		return;
+	}
+
 	
 	VL6180x_RangeGetInterruptStatus(vl6180x_dev, &gpio_status);
 	if (gpio_status == RES_INT_STAT_GPIO_NEW_SAMPLE_READY)
@@ -591,6 +600,7 @@ static int stmvl6180_ioctl_handler(struct file *file,
 		if (client)
 		{
 			struct stmvl6180_data *data = i2c_get_clientdata(client);
+			mutex_lock(&data->work_mutex);
 			//turn on p sensor only if it's not enabled by other client
 			if (data->enable_ps_sensor==0) {
 				printk("ioclt INIT to enable PS sensor=====\n");
@@ -635,6 +645,7 @@ static int stmvl6180_ioctl_handler(struct file *file,
 			}
 		
 
+			mutex_unlock(&data->work_mutex);
 		}
 		return 0;
 	}
@@ -841,6 +852,7 @@ static int stmvl6180_ioctl_handler(struct file *file,
 		if (client)
 		{
 			struct stmvl6180_data *data = i2c_get_clientdata(client);
+			mutex_lock(&data->work_mutex);
 			//turn off p sensor only if it's enabled by other client
 			if (data->enable_ps_sensor==1) {
 
@@ -866,6 +878,7 @@ static int stmvl6180_ioctl_handler(struct file *file,
 			} else {
 				pr_warn("%s(), ioctl STOP, do nothing\n", __func__);
 			}
+			mutex_unlock(&data->work_mutex);
 		}
 		return 0;
 	}
@@ -945,6 +958,8 @@ static int stmvl6180_flush(struct file *file, fl_owner_t id)
 	if (client)
 	{
 		struct stmvl6180_data *data = i2c_get_clientdata(client);
+		mutex_lock(&vl6180_mutex);
+		mutex_lock(&data->work_mutex);
 		if (data->enable_ps_sensor==1) 
 		{
 			//turn off p sensor if it's enabled
@@ -978,6 +993,8 @@ static int stmvl6180_flush(struct file *file, fl_owner_t id)
 			offset_init = 0;
 			spin_unlock(&g_Laser_SpinLock);
 		}
+		mutex_unlock(&data->work_mutex);
+		mutex_unlock(&vl6180_mutex);
 	}
 
 	return 0;
@@ -992,6 +1009,50 @@ static long stmvl6180_ioctl(struct file *file,
 
 	return ret;
 }
+
+
+#ifdef CONFIG_COMPAT
+/* The camera HAL is ARM32 on an ARM64 kernel. GETDATA is the only
+ * command whose payload (unsigned long) changes size between ABIs.
+ * RangeData contains fixed-width integers and has identical layout.
+ */
+static long stmvl6180_compat_ioctl(struct file *file,
+                                 unsigned int cmd, unsigned long arg)
+{
+	void __user *up = compat_ptr(arg);
+	struct i2c_client *client;
+	struct stmvl6180_data *data;
+	compat_ulong_t distance;
+	long ret;
+
+	if (cmd == _IOR('p', 0x0a, compat_ulong_t)) {
+		mutex_lock(&vl6180_mutex);
+		client = i2c_getclient();
+		if (IS_ERR_OR_NULL(client)) {
+			ret = -ENODEV;
+		} else {
+			data = i2c_get_clientdata(client);
+			distance = data->rangeData.FilteredData.range_mm;
+			ret = put_user(distance, (compat_ulong_t __user *)up);
+		}
+		mutex_unlock(&vl6180_mutex);
+		return ret;
+	}
+
+	switch (cmd) {
+	case VL6180_IOCTL_INIT:
+	case VL6180_IOCTL_XTALKCALB:
+	case VL6180_IOCTL_OFFCALB:
+	case VL6180_IOCTL_STOP:
+	case VL6180_IOCTL_SETXTALK:
+	case VL6180_IOCTL_SETOFFSET:
+	case VL6180_IOCTL_GETDATAS:
+		return stmvl6180_ioctl(file, cmd, (unsigned long)up);
+	default:
+		return -ENOIOCTLCMD;
+	}
+}
+#endif
 
 
 /*
@@ -1301,6 +1362,9 @@ MODULE_DEVICE_TABLE(i2c, stmvl6180_id);
 static const struct file_operations stmvl6180_ranging_fops = {
 		.owner =			THIS_MODULE,
 		.unlocked_ioctl =	stmvl6180_ioctl,
+#ifdef CONFIG_COMPAT
+		.compat_ioctl = stmvl6180_compat_ioctl,
+#endif
 		.open =				stmvl6180_open,
 		.flush = 			stmvl6180_flush,
 };

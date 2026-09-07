@@ -1503,7 +1503,11 @@ static ssize_t enable_store(struct device *pdev, struct device_attribute *attr,
 		 * Userspace enabling android_usb is sufficient intent to prepare
 		 * the device side; a later notifier event remains harmless.
 		 */
-		wake_lock(&dev->wakelock);
+		/* Enumeration may be requested without a physical USB host.
+		 * Bound this provisional hold; setup promotes it to a connection
+		 * hold once the host actually talks to the gadget.
+		 */
+		wake_lock_timeout(&dev->wakelock, 10 * HZ);
 		if (!dev->usb_attach)
 			pr_info("android_usb: forcing DWC3 gadget VBUS session\n");
 		dwc3_exynos_vbus_event(NULL, 1);
@@ -1748,6 +1752,10 @@ android_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *c)
 		cdev->mute_switch = false;
 #endif
 	if (!dev->connected) {
+		/* Also covers hosts classified as adapters by MUIC, including
+		 * reconnects that do not produce USB_HOST_ATTACH.
+		 */
+		wake_lock(&dev->wakelock);
 		dev->connected = 1;
 		schedule_work(&dev->work);
 	} else if (c->bRequest == USB_REQ_SET_CONFIGURATION &&
@@ -1770,6 +1778,7 @@ static void android_disconnect(struct usb_composite_dev *cdev)
 	acc_disconnect();
 
 	dev->connected = 0;
+	wake_unlock(&dev->wakelock);
 #ifdef CONFIG_USB_ANDROID_SAMSUNG_COMPOSITE
 	printk(KERN_DEBUG "usb: %s con(%d), sw(%d)\n",
 		 __func__, dev->connected, dev->sw_connected);
@@ -1848,11 +1857,14 @@ static int gadget_usb_switch_notify(struct notifier_block *this,
 			break;
 		case USB_HOST_DETACH:
 			dwc3_exynos_vbus_event(NULL, 0);
+			/* Fall through: a generic port detach must release the hold
+			 * even when MUIC never classified the cable as a USB host.
+			 */
+		case USB_PORT_DETACH:
 			wake_unlock(&dev->wakelock);
 			dev->usb_attach = false;
 			break;
 		default:
-			dev->usb_attach = false;
 			break;
 	}
 	return NOTIFY_DONE;

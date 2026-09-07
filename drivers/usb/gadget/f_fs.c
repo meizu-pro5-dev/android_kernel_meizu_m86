@@ -1164,6 +1164,14 @@ static int ffs_aio_cancel(struct kiocb *kiocb, struct io_event *event)
 
 	spin_unlock_irq(&epfile->ffs->eps_lock);
 
+	/*
+	 * This 3.10 AIO core takes an extra ki_users reference before calling
+	 * ki_cancel.  Drop that cancellation reference just as GadgetFS does;
+	 * the completion worker still owns the outstanding I/O reference.
+	 * Otherwise the endpoint file stays open across an adbd restart and
+	 * FunctionFS cannot return to FFS_READ_DESCRIPTORS.
+	 */
+	aio_put_req(kiocb);
 	return value;
 }
 

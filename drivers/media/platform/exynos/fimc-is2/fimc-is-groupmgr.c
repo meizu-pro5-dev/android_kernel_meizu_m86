@@ -976,13 +976,16 @@ int fimc_is_groupmgr_start(struct fimc_is_groupmgr *groupmgr,
 				height -= device->margin_height;
 			} else {
 				if (prev && prev->junction) {
-					/* HACK, Max size constrains */
+					/* The IMX230 UHD mode supplies a 3840x2160 crop.
+					 * Keep the OTF envelope large enough for that mode;
+					 * per-frame crops still select the requested BDS size.
+					 */
 					if (prev->slot == GROUP_SLOT_3AA) {
-						if (width > 2560)
-							width = 2560;
+						if (width > 3840)
+							width = 3840;
 
-						if (height > 1440)
-							height = 1440;
+						if (height > 2160)
+							height = 2160;
 					}
 
 					leader->input.width = width;
