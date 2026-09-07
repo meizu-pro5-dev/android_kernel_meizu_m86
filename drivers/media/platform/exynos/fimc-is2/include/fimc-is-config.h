@@ -80,7 +80,7 @@
 #define SOC_VRA
 
 /* Post Processing Configruation */
-/* #define ENABLE_DRC */
+#define ENABLE_DRC
 /* #define ENABLE_DIS */
 //#define ENABLE_DNR
 #define ENABLE_VRA

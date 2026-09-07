@@ -1290,6 +1290,25 @@ int fimc_is_set_dvfs(struct fimc_is_device_ischain *device, u32 scenario_id)
 		return -EINVAL;
 	}
 
+	/* Reprocessing shares the buses with the running preview. A capture
+	 * vote must not lower its static bandwidth requirement (notably UHD).
+	 * The dynamic vote is temporary; the existing frame-tick path restores
+	 * the static vote after capture.
+	 */
+	if (test_bit(FIMC_IS_ISCHAIN_REPROCESSING, &device->state) &&
+	    dvfs_ctrl->static_ctrl && dvfs_ctrl->static_ctrl->cur_scenario_id >= 0) {
+		int static_id = dvfs_ctrl->static_ctrl->cur_scenario_id;
+		int static_int = fimc_is_get_qos(core, FIMC_IS_DVFS_INT, static_id);
+		int static_mif = fimc_is_get_qos(core, FIMC_IS_DVFS_MIF, static_id);
+		int static_cam = fimc_is_get_qos(core, FIMC_IS_DVFS_CAM, static_id);
+
+		if (static_int < 0 || static_mif < 0 || static_cam < 0)
+			return -EINVAL;
+		int_qos = max(int_qos, static_int);
+		mif_qos = max(mif_qos, static_mif);
+		cam_qos = max(cam_qos, static_cam);
+	}
+
 	/* check current qos */
 	if (int_qos && dvfs_ctrl->cur_int_qos != int_qos) {
 		if (i2c_qos) {
