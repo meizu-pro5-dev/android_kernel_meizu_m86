@@ -1312,6 +1312,8 @@ int meizu_escore_request_firmware(const struct firmware **fw,
 	char *path = __getname();
 	unsigned long timeout = jiffies + msecs_to_jiffies(60 * 1000); // 60 seconds
 	static const char * const fw_path[] = {
+		/* Device firmware must survive replacement of the system image. */
+		"/vendor/etc/firmware/",
 		"/etc/firmware/",
 		"/data/data/com.android.settings/files",
 		"/data/data/com.audience.voiceqmultikeyword/files/",
