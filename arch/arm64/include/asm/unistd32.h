@@ -785,8 +785,8 @@ __SYSCALL(__NR_finit_module, sys_finit_module)
 __SYSCALL(380, sys_ni_syscall)
 /* #define __NR_sched_getattr 381 */
 __SYSCALL(381, sys_ni_syscall)
-/* #define __NR_renameat2 382 */
-__SYSCALL(382, sys_ni_syscall)
+#define __NR_renameat2 382
+__SYSCALL(__NR_renameat2, sys_renameat2)
 #define __NR_seccomp 383
 __SYSCALL(__NR_seccomp, sys_seccomp)
 #define __NR_getrandom 384
