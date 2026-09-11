@@ -19,6 +19,7 @@
 #include <linux/module.h>
 #include <linux/device-mapper.h>
 #include <crypto/hash.h>
+#include <linux/reboot.h>
 
 #define DM_MSG_PREFIX			"verity"
 
@@ -41,6 +42,8 @@ struct dm_verity {
 	struct crypto_shash *tfm;
 	u8 *root_digest;	/* digest of the root block */
 	u8 *salt;		/* salt: its size is salt_size */
+	u8 *zero_digest;	/* authenticated digest of a zero data block */
+	bool restart_on_corruption;
 	unsigned salt_size;
 	sector_t data_start;	/* data offset in 512-byte sectors */
 	sector_t hash_start;	/* hash start in blocks */
@@ -259,6 +262,8 @@ static int verity_verify_level(struct dm_verity_io *io, sector_t block,
 			DMERR_LIMIT("metadata block %llu is corrupted",
 				(unsigned long long)hash_block);
 			v->hash_failed = 1;
+			if (v->restart_on_corruption)
+				kernel_restart("dm-verity metadata corruption");
 			r = -EIO;
 			goto release_ret_r;
 		} else
@@ -318,6 +323,29 @@ static int verity_verify_io(struct dm_verity_io *io)
 		}
 
 test_block_hash:
+		/* The expected digest comes from the verified hash tree above.
+		 * Never return unverified backing data for a known-zero block.
+		 */
+		if (v->zero_digest &&
+		    !memcmp(io_want_digest(v, io), v->zero_digest, v->digest_size)) {
+			todo = 1 << v->data_dev_block_bits;
+			do {
+				struct bio_vec *bv;
+				unsigned len;
+
+				BUG_ON(vector >= io->io_vec_size);
+				bv = &io->io_vec[vector];
+				len = min(todo, bv->bv_len - offset);
+				zero_user(bv->bv_page, bv->bv_offset + offset, len);
+				offset += len;
+				if (offset == bv->bv_len) {
+					offset = 0;
+					vector++;
+				}
+				todo -= len;
+			} while (todo);
+			continue;
+		}
 		desc = io_hash_desc(v, io);
 		desc->tfm = v->tfm;
 		desc->flags = CRYPTO_TFM_REQ_MAY_SLEEP;
@@ -380,6 +408,8 @@ test_block_hash:
 			DMERR_LIMIT("data block %llu is corrupted",
 				(unsigned long long)(io->block + b));
 			v->hash_failed = 1;
+			if (v->restart_on_corruption)
+				kernel_restart("dm-verity data corruption");
 			return -EIO;
 		}
 	}
@@ -567,6 +597,13 @@ static void verity_status(struct dm_target *ti, status_type_t type,
 		else
 			for (x = 0; x < v->salt_size; x++)
 				DMEMIT("%02x", v->salt[x]);
+		if (v->zero_digest || v->restart_on_corruption) {
+			DMEMIT(" %u", !!v->zero_digest + v->restart_on_corruption);
+			if (v->zero_digest)
+				DMEMIT(" ignore_zero_blocks");
+			if (v->restart_on_corruption)
+				DMEMIT(" restart_on_corruption");
+		}
 		break;
 	}
 }
@@ -634,6 +671,7 @@ static void verity_dtr(struct dm_target *ti)
 	if (v->bufio)
 		dm_bufio_client_destroy(v->bufio);
 
+	kfree(v->zero_digest);
 	kfree(v->salt);
 	kfree(v->root_digest);
 
@@ -649,6 +687,39 @@ static void verity_dtr(struct dm_target *ti)
 		dm_put_device(ti, v->data_dev);
 
 	kfree(v);
+}
+
+/* Backport the zero-block digest semantics using the 3.10 shash API. */
+static int verity_alloc_zero_digest(struct dm_verity *v)
+{
+	struct shash_desc *desc;
+	void *zero;
+	int r;
+
+	v->zero_digest = kmalloc(v->digest_size, GFP_KERNEL);
+	if (!v->zero_digest)
+		return -ENOMEM;
+	desc = kmalloc(v->shash_descsize, GFP_KERNEL);
+	zero = kzalloc(1 << v->data_dev_block_bits, GFP_KERNEL);
+	if (!desc || !zero) {
+		r = -ENOMEM;
+		goto out;
+	}
+	desc->tfm = v->tfm;
+	desc->flags = CRYPTO_TFM_REQ_MAY_SLEEP;
+	r = crypto_shash_init(desc);
+	if (!r && v->version)
+		r = crypto_shash_update(desc, v->salt, v->salt_size);
+	if (!r)
+		r = crypto_shash_update(desc, zero, 1 << v->data_dev_block_bits);
+	if (!r && !v->version)
+		r = crypto_shash_update(desc, v->salt, v->salt_size);
+	if (!r)
+		r = crypto_shash_final(desc, v->zero_digest);
+out:
+	kfree(zero);
+	kfree(desc);
+	return r;
 }
 
 /*
@@ -689,8 +760,8 @@ static int verity_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto bad;
 	}
 
-	if (argc != 10) {
-		ti->error = "Invalid argument count: exactly 10 arguments required";
+	if (argc < 10) {
+		ti->error = "At least 10 arguments required";
 		r = -EINVAL;
 		goto bad;
 	}
@@ -808,6 +879,36 @@ static int verity_ctr(struct dm_target *ti, unsigned argc, char **argv)
 			ti->error = "Invalid salt";
 			r = -EINVAL;
 			goto bad;
+		}
+	}
+
+	/* APEX requires these two optional features. Reject unknown options and
+	 * duplicate entries instead of silently accepting unsupported behavior.
+	 */
+	if (argc > 10) {
+		unsigned features;
+
+		if (kstrtouint(argv[10], 10, &features) ||
+		    features != argc - 11 || features > 2) {
+			ti->error = "Invalid verity feature count";
+			r = -EINVAL;
+			goto bad;
+		}
+		for (i = 11; i < argc; i++) {
+			if (!strcmp(argv[i], "ignore_zero_blocks") && !v->zero_digest) {
+				r = verity_alloc_zero_digest(v);
+				if (r) {
+					ti->error = "Cannot calculate zero-block digest";
+					goto bad;
+				}
+			} else if (!strcmp(argv[i], "restart_on_corruption") &&
+				   !v->restart_on_corruption) {
+				v->restart_on_corruption = true;
+			} else {
+				ti->error = "Unknown or duplicate verity feature";
+				r = -EINVAL;
+				goto bad;
+			}
 		}
 	}
 
